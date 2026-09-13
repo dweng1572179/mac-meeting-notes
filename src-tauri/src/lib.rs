@@ -1,3 +1,6 @@
+pub mod domain;
+pub mod store;
+
 pub const APP_NAME: &str = "Meeting Notes";
 pub const BUNDLE_ID: &str = "com.dweng.meetingnotes";
 
