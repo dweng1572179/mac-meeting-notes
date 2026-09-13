@@ -1,4 +1,6 @@
 pub mod domain;
+pub mod openai;
+pub mod secrets;
 pub mod store;
 
 pub const APP_NAME: &str = "Meeting Notes";
