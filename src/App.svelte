@@ -26,7 +26,7 @@
   onMount(() => {
     bootstrap()
       .then((data) => {
-        sessions = [...data.sessions].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+        sessions = data.sessions;
         selectedId = sessions[0]?.id ?? null;
         hasApiKey = data.hasApiKey;
       })
@@ -91,13 +91,8 @@
   async function removeMeeting(id: string) {
     if (id === selectedId) await editor?.flush();
     await deleteSession(id);
-    const removedIndex = sessions.findIndex((session) => session.id === id);
-    const nextSelectedId =
-      id === selectedId
-        ? (sessions[removedIndex + 1]?.id ?? sessions[removedIndex - 1]?.id ?? null)
-        : selectedId;
     sessions = sessions.filter((session) => session.id !== id);
-    selectedId = nextSelectedId;
+    if (id === selectedId) selectedId = null;
     const { [id]: _removed, ...active } = recordingBaselines;
     recordingBaselines = active;
   }

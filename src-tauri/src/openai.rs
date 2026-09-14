@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use reqwest::{multipart, Client, StatusCode};
 use serde::Deserialize;
@@ -29,7 +29,12 @@ impl OpenAiClient {
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(120))
+                .timeout(Duration::from_secs(900))
+                .build()
+                .expect("OpenAI HTTP client configuration is valid"),
             base_url: base_url.into(),
         }
     }
@@ -38,6 +43,7 @@ impl OpenAiClient {
         let response = self
             .client
             .get(format!("{}/models/{ENRICHMENT_MODEL}", self.base_url))
+            .timeout(Duration::from_secs(10))
             .bearer_auth(api_key)
             .send()
             .await
@@ -56,7 +62,13 @@ impl OpenAiClient {
         let form = multipart::Form::new()
             .text("model", "gpt-4o-mini-transcribe")
             .text("response_format", "json")
-            .part("file", multipart::Part::bytes(audio).file_name(filename));
+            .part(
+                "file",
+                multipart::Part::bytes(audio)
+                    .file_name(filename)
+                    .mime_str("audio/mp4")
+                    .map_err(openai_request_error)?,
+            );
         let response = self
             .client
             .post(format!("{}/audio/transcriptions", self.base_url))
@@ -77,6 +89,7 @@ impl OpenAiClient {
         let response = self
             .client
             .post(format!("{}/responses", self.base_url))
+            .timeout(Duration::from_secs(300))
             .bearer_auth(api_key)
             .json(&build_enrichment_request(session))
             .send()

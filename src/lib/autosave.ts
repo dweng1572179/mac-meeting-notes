@@ -1,13 +1,14 @@
 export function createAutosave<T>(delay: number, save: (value: T) => Promise<void>) {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let pending: { value: T } | undefined;
+  let pending: { value: T; generation: number } | undefined;
+  let generation = 0;
   let queue = Promise.resolve();
 
-  async function saveValue(current: { value: T }) {
+  async function saveValue(current: { value: T; generation: number }) {
     try {
       await save(current.value);
     } catch (error) {
-      pending ??= current;
+      if (current.generation === generation) pending ??= current;
       throw error;
     }
   }
@@ -39,7 +40,7 @@ export function createAutosave<T>(delay: number, save: (value: T) => Promise<voi
 
   return {
     schedule(value: T) {
-      pending = { value };
+      pending = { value, generation: ++generation };
       clearTimeout(timer);
       timer = setTimeout(() => {
         timer = undefined;

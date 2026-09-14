@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
+        with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: rustup target add aarch64-apple-darwin
       - run: npm test -- --run
@@ -22,6 +22,9 @@ jobs:
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: npm run tauri build -- --target aarch64-apple-darwin
       - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.1.0_aarch64.dmg" Meeting-Notes.dmg
-      - run: gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg --title "Meeting Notes $GITHUB_REF_NAME" --notes "Unsigned beta: after copying the app to Applications, right-click it and choose Open once."
+      - run: >-
+          gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
+          --title "Meeting Notes $GITHUB_REF_NAME"
+          --notes "Unsigned beta: copy Meeting Notes to Applications. On macOS 14, right-click the app and choose Open once. On macOS 15 or later, first try opening the app and dismiss the warning, then go to System Settings → Privacy & Security → Open Anyway and confirm opening Meeting Notes."
         env:
           GH_TOKEN: ${{ github.token }}

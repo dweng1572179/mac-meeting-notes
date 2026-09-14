@@ -47,7 +47,7 @@
     </label>
 
     <nav aria-label="Primary">
-      <button class="nav-item" class:active={!selectedId} type="button" onclick={onHome}>
+      <button class="nav-item" class:active={!selectedId} aria-current={!selectedId ? 'page' : undefined} type="button" onclick={onHome}>
         <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3.5 9 10 3.5 16.5 9v7.5h-5v-4h-3v4h-5Z"></path></svg>
         <span>Home</span>
       </button>
@@ -66,6 +66,7 @@
           <li>
             <button
               class:selected={selectedId === session.id}
+              aria-current={selectedId === session.id ? 'page' : undefined}
               type="button"
               onclick={() => onSelect(session.id)}
             >

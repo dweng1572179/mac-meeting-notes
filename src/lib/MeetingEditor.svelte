@@ -183,16 +183,14 @@
         popovertarget="meeting-actions"
       >•••</button>
     </div>
-    <div bind:this={actionMenu} class="meeting-actions" id="meeting-actions" popover="auto" role="menu">
+    <div bind:this={actionMenu} class="meeting-actions" id="meeting-actions" popover="auto">
       <button
         type="button"
-        role="menuitem"
         disabled={session.transcript === null || session.status === 'recording' || session.status === 'processing'}
         onclick={() => requestDeletion('transcript')}
       >Delete transcript</button>
       <button
         type="button"
-        role="menuitem"
         disabled={session.status === 'recording' || session.status === 'processing'}
         onclick={() => requestDeletion('meeting')}
       >Delete meeting</button>

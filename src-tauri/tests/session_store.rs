@@ -1,6 +1,94 @@
 use meeting_notes_lib::domain::{CreateSessionInput, Session, UpdateSessionInput};
 use meeting_notes_lib::store::SessionStore;
 
+#[cfg(unix)]
+fn symlinked_session_destination(destination: &str) {
+    use std::{fs, os::unix::fs::symlink};
+
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("sessions")).unwrap();
+    fs::create_dir_all(root.join("outside")).unwrap();
+    let mut session = Session::new(CreateSessionInput {
+        title: "Safe notes".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    session.id = "session".into();
+    let victim = root.join("outside/victim");
+    fs::write(&victim, "untouched").unwrap();
+    if destination == "sessions" {
+        fs::remove_dir(root.join("sessions")).unwrap();
+        symlink(root.join("outside"), root.join("sessions")).unwrap();
+    } else {
+        symlink(&victim, root.join("sessions").join(destination)).unwrap();
+    }
+    let result = SessionStore::new(root.clone()).save(&session);
+    let untouched = fs::read_to_string(&victim).unwrap();
+    let escaped = root.join("outside/session.json").exists();
+    fs::remove_dir_all(root).unwrap();
+    assert!(result.is_err(), "accepted {destination}");
+    assert_eq!(untouched, "untouched", "overwrote {destination}");
+    assert!(!escaped, "wrote through sessions symlink");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_rejects_symlinked_sessions_directory() {
+    symlinked_session_destination("sessions");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_rejects_symlinked_canonical_session() {
+    symlinked_session_destination("session.json");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_rejects_symlinked_temporary_session() {
+    symlinked_session_destination("session.json.tmp");
+}
+
+#[cfg(unix)]
+#[test]
+fn list_reports_inaccessible_sessions_instead_of_an_empty_library() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("sessions")).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+    let result = SessionStore::new(root.clone()).list();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_dir_all(root).unwrap();
+    assert_eq!(result.unwrap_err().code, "storage_error");
+}
+
+#[test]
+fn cleanup_keeps_tombstone_and_audio_when_the_canonical_session_exists() {
+    use std::fs;
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("audio")).unwrap();
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Kept meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    let audio = root.join("audio").join(format!("{}.m4a", session.id));
+    fs::write(&audio, "retained audio").unwrap();
+    session.audio_path = Some(audio.to_string_lossy().into_owned());
+    store.save(&session).unwrap();
+    let canonical = root.join("sessions").join(format!("{}.json", session.id));
+    let tombstone = canonical.with_extension("json.deleting");
+    fs::copy(&canonical, &tombstone).unwrap();
+    let listed = store.list().unwrap();
+    let kept_audio = audio.exists();
+    let kept_tombstone = tombstone.exists();
+    fs::remove_dir_all(root).unwrap();
+    assert_eq!(listed, vec![session]);
+    assert!(kept_audio, "deleted canonical session audio");
+    assert!(kept_tombstone, "removed uncommitted tombstone");
+}
+
 #[test]
 fn original_notes_survive_reopen() {
     let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));

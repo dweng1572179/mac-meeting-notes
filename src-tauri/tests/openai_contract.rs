@@ -110,6 +110,23 @@ fn openai_statuses_map_to_stable_error_codes() {
     }
 }
 
+#[test]
+fn transcription_upload_identifies_m4a_as_audio_mp4() {
+    let path = std::env::temp_dir().join(format!("meeting-notes-{}.m4a", uuid::Uuid::new_v4()));
+    std::fs::write(&path, "disposable audio bytes").unwrap();
+    let (base_url, requests) = local_server(json_response(200, r#"{"text":"spoken notes"}"#));
+    let result = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url(base_url).transcribe(&path, "test-key"),
+    );
+    let request = requests.recv().unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(result.unwrap(), "spoken notes");
+    assert!(request
+        .body
+        .to_lowercase()
+        .contains("content-type: audio/mp4\r\n"));
+}
+
 fn session() -> Session {
     let mut session = Session::new(CreateSessionInput {
         title: "[SIMULATION] Harbor Office 73".into(),

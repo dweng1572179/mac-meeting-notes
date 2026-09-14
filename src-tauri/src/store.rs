@@ -18,8 +18,8 @@ impl SessionStore {
     }
 
     pub fn list(&self) -> AppResult<Vec<Session>> {
-        let directory = self.sessions_dir();
-        if !directory.exists() {
+        let directory = self.sessions_dir()?;
+        if !directory.try_exists().map_err(io_error)? {
             return Ok(Vec::new());
         }
         self.cleanup_deletions();
@@ -44,7 +44,7 @@ impl SessionStore {
 
     pub fn get(&self, id: &str) -> AppResult<Session> {
         self.validate_id(id)?;
-        self.read_session(self.sessions_dir().join(format!("{id}.json")))
+        self.read_session(self.sessions_dir()?.join(format!("{id}.json")))
     }
 
     pub fn save(&self, session: &Session) -> AppResult<()> {
@@ -52,12 +52,21 @@ impl SessionStore {
         if let Some(path) = session.audio_path.as_deref() {
             self.validate_audio_path(&session.id, path)?;
         }
-        let directory = self.sessions_dir();
-        fs::create_dir_all(&directory).map_err(io_error)?;
+        let directory = self.sessions_dir()?;
         let json = serde_json::to_vec_pretty(session).map_err(json_error)?;
         let path = directory.join(format!("{}.json", session.id));
         let temporary_path = directory.join(format!("{}.json.tmp", session.id));
-        let mut temporary = File::create(&temporary_path).map_err(io_error)?;
+        validate_file(&path)?;
+        let temporary_exists = validate_file(&temporary_path)?;
+        fs::create_dir_all(&directory).map_err(io_error)?;
+        if temporary_exists {
+            fs::remove_file(&temporary_path).map_err(io_error)?;
+        }
+        let mut temporary = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+            .map_err(io_error)?;
         temporary.write_all(&json).map_err(io_error)?;
         temporary.sync_all().map_err(io_error)?;
         fs::rename(temporary_path, path).map_err(io_error)?;
@@ -70,10 +79,10 @@ impl SessionStore {
             self.validate_audio_path(id, path)?;
         }
 
-        let sessions_directory = self.sessions_dir();
+        let sessions_directory = self.sessions_dir()?;
         let session_path = sessions_directory.join(format!("{id}.json"));
         let tombstone_path = sessions_directory.join(format!("{id}.json.deleting"));
-        if tombstone_path.exists() {
+        if validate_file(&tombstone_path)? {
             return Err(AppError::new(
                 "storage_error",
                 "A prior meeting deletion still needs cleanup",
@@ -87,11 +96,15 @@ impl SessionStore {
         Ok(())
     }
 
-    fn sessions_dir(&self) -> PathBuf {
-        self.root.join("sessions")
+    fn sessions_dir(&self) -> AppResult<PathBuf> {
+        validate_directory(&self.root)?;
+        let directory = self.root.join("sessions");
+        validate_directory(&directory)?;
+        Ok(directory)
     }
 
-    fn validate_audio_path(&self, id: &str, audio_path: &str) -> AppResult<PathBuf> {
+    pub(crate) fn validate_audio_path(&self, id: &str, audio_path: &str) -> AppResult<PathBuf> {
+        self.validate_id(id)?;
         let audio_directory = self.root.join("audio");
         let expected = audio_directory.join(format!("{id}.m4a"));
         let audio_path = PathBuf::from(audio_path);
@@ -99,26 +112,16 @@ impl SessionStore {
             return Err(invalid_audio_path());
         }
 
-        let root = self.root.canonicalize().map_err(|_| invalid_audio_path())?;
-        let directory = audio_directory
-            .canonicalize()
-            .map_err(|_| invalid_audio_path())?;
-        if directory != root.join("audio") {
-            return Err(invalid_audio_path());
-        }
-        if audio_path.exists()
-            && audio_path
-                .canonicalize()
-                .map_err(|_| invalid_audio_path())?
-                != directory.join(format!("{id}.m4a"))
-        {
-            return Err(invalid_audio_path());
-        }
+        validate_directory(&self.root).map_err(|_| invalid_audio_path())?;
+        validate_directory(&audio_directory).map_err(|_| invalid_audio_path())?;
+        validate_file(&audio_path).map_err(|_| invalid_audio_path())?;
         Ok(audio_path)
     }
 
     fn cleanup_deletions(&self) {
-        let directory = self.sessions_dir();
+        let Ok(directory) = self.sessions_dir() else {
+            return;
+        };
         let Ok(entries) = fs::read_dir(&directory) else {
             return;
         };
@@ -140,6 +143,13 @@ impl SessionStore {
 
     fn cleanup_deletion(&self, id: &str, tombstone_path: &Path) -> AppResult<()> {
         self.validate_id(id)?;
+        let canonical = self.sessions_dir()?.join(format!("{id}.json"));
+        if validate_file(&canonical)? {
+            return Err(AppError::new(
+                "storage_error",
+                "Meeting deletion has not committed",
+            ));
+        }
         let session = self.read_session(tombstone_path.to_owned())?;
         if session.id != id {
             return Err(AppError::new(
@@ -157,11 +167,13 @@ impl SessionStore {
             sync_directory(&self.root.join("audio"))?;
         }
         fs::remove_file(tombstone_path).map_err(io_error)?;
-        let _ = sync_directory(&self.sessions_dir());
+        let _ = sync_directory(&self.sessions_dir()?);
         Ok(())
     }
 
     fn read_session(&self, path: PathBuf) -> AppResult<Session> {
+        self.sessions_dir()?;
+        validate_file(&path)?;
         let json = fs::read(path).map_err(io_error)?;
         serde_json::from_slice(&json).map_err(json_error)
     }
@@ -176,6 +188,30 @@ impl SessionStore {
         } else {
             Err(AppError::new("invalid_session_id", "Session ID is invalid"))
         }
+    }
+}
+
+fn validate_directory(path: &Path) -> AppResult<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(error)),
+        _ => Err(AppError::new(
+            "storage_error",
+            "App data directory must not be a symlink or file",
+        )),
+    }
+}
+
+fn validate_file(path: &Path) -> AppResult<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(error)),
+        _ => Err(AppError::new(
+            "storage_error",
+            "App data file must not be a symlink or directory",
+        )),
     }
 }
 

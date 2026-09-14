@@ -4,6 +4,38 @@ import { createAutosave } from './autosave';
 afterEach(() => vi.useRealTimers());
 
 describe('createAutosave', () => {
+  it('never retries an older failed snapshot after a newer snapshot has been queued', async () => {
+    vi.useFakeTimers();
+    const saved: string[] = [];
+    let failFirst!: (error: Error) => void;
+    const firstSave = new Promise<void>((_, reject) => (failFirst = reject));
+    const autosave = createAutosave<string>(450, async (draft) => {
+      saved.push(draft);
+      if (saved.length === 1) await firstSave;
+    });
+
+    autosave.schedule('old');
+    await vi.advanceTimersByTimeAsync(450);
+    autosave.schedule('new');
+    await vi.advanceTimersByTimeAsync(450);
+    failFirst(new Error('disk full'));
+    await autosave.flush();
+
+    expect(saved).toEqual(['old', 'new']);
+  });
+
+  it('retries the latest failed snapshot when no newer draft exists', async () => {
+    const saved: string[] = [];
+    const autosave = createAutosave<string>(450, async (draft) => {
+      saved.push(draft);
+      if (saved.length === 1) throw new Error('disk full');
+    });
+    autosave.schedule('latest');
+    await expect(autosave.flush()).rejects.toThrow('disk full');
+    await autosave.flush();
+    expect(saved).toEqual(['latest', 'latest']);
+  });
+
   it('saves only the latest draft after 450 milliseconds of inactivity', async () => {
     vi.useFakeTimers();
     const saved: string[] = [];

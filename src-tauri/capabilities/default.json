@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capabilities for Meeting Notes.",
   "windows": ["main"],
-  "permissions": ["core:window:default", "core:event:default"]
+  "permissions": ["core:window:default", "core:window:allow-destroy", "core:event:default"]
 }

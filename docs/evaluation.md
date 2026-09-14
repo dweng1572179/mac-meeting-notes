@@ -12,7 +12,7 @@ This check uses labeled synthetic content only. It tests that a later final deci
 6. After playback ends, stop the meeting and wait for processing to complete.
 7. Check both the Original and Enhanced views against the checklist below.
 8. Quit Meeting Notes, reopen it, select the same meeting, and check both views again.
-9. Confirm the completed meeting has no retained `.m4a` file in the app's `audio` data directory.
+9. In Finder, choose **Go → Go to Folder**, enter `~/Library/Application Support/com.dweng.meetingnotes/audio/`, and confirm the completed meeting has no retained `.m4a` file there.
 
 ```text
 [ ] Original note preserved verbatim

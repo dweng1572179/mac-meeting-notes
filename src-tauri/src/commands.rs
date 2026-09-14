@@ -75,19 +75,36 @@ pub fn start_recording(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<RecordingInfo> {
-    let session = load_session(&state, &id)?;
+    let path = audio_path(&app, &id)?;
+    start_recording_state(&state, &id, path, |id, path| state.recorder.start(id, path))
+}
+
+fn start_recording_state(
+    state: &AppState,
+    id: &str,
+    audio_path: PathBuf,
+    start: impl FnOnce(&str, &std::path::Path) -> AppResult<RecordingInfo>,
+) -> AppResult<RecordingInfo> {
+    let session = load_session(state, id)?;
     if session.status != SessionStatus::Draft {
         return Err(invalid_status("Only a draft session can start recording"));
     }
 
-    let audio_path = audio_path(&app, &session.id)?;
+    state
+        .store
+        .validate_audio_path(id, &audio_path.to_string_lossy())?;
     if let Some(parent) = audio_path.parent() {
         fs::create_dir_all(parent).map_err(storage_error)?;
     }
-    let recording = state.recorder.start(&session.id, &audio_path)?;
-    if let Err(error) = persist_recording(&state, &id, audio_path.to_string_lossy().into_owned()) {
+    let recording = start(&session.id, &audio_path)?;
+    if let Err(error) = persist_recording(state, id, audio_path.to_string_lossy().into_owned()) {
         let _ = state.recorder.stop(&session.id);
-        let _ = fs::remove_file(audio_path);
+        if let Ok(path) = state
+            .store
+            .validate_audio_path(id, &audio_path.to_string_lossy())
+        {
+            let _ = fs::remove_file(path);
+        }
         return Err(error);
     }
     Ok(recording)
@@ -99,13 +116,36 @@ pub fn stop_recording(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<Session> {
-    let session = load_session(&state, &id)?;
-    if session.status != SessionStatus::Recording {
+    let session = stop_recording_state(&state, &id, |id| state.recorder.stop(id))?;
+    if session.status == SessionStatus::Processing {
+        spawn_processing(app, id);
+    }
+    Ok(session)
+}
+
+fn stop_recording_state(
+    state: &AppState,
+    id: &str,
+    stop: impl FnOnce(&str) -> AppResult<PathBuf>,
+) -> AppResult<Session> {
+    let _guard = lock_sessions(state)?;
+    let original = state.store.get(id)?;
+    if original.status != SessionStatus::Recording {
         return Err(invalid_status("Only a recording session can be stopped"));
     }
-    let path = state.recorder.stop(&id)?;
-    let session = persist_stopped(&state, &id, path.to_string_lossy().into_owned())?;
-    spawn_processing(app, id);
+    let mut session = match stop(id) {
+        Ok(path) => {
+            transition_to_processing(original.clone(), path.to_string_lossy().into_owned())?
+        }
+        Err(error) => transition_to_failed(original.clone(), error),
+    };
+    session.ended_at.get_or_insert_with(now);
+    if let Err(error) = state.store.save(&session) {
+        session = transition_to_failed(original, error);
+        session.ended_at.get_or_insert_with(now);
+        let _ = state.store.save(&session);
+    }
+    // Returning the failed snapshot also leaves the UI recoverable when storage is unavailable.
     Ok(session)
 }
 
@@ -198,13 +238,13 @@ async fn process_session(app: &AppHandle, id: &str) -> AppResult<()> {
         .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
 
     if needs_transcription(&session) {
-        let path = retained_audio_path(app, &session)?
+        let path = retained_audio_path(&state, &session)?
             .ok_or_else(|| AppError::new("audio_file", "Recorded audio is unavailable"))?;
         let transcript = state.openai.transcribe(&path, &api_key).await?;
         persist_transcript(&state, id, transcript)?;
     }
 
-    session = remove_retained_audio(app, &state, id)?;
+    session = remove_retained_audio(&state, id)?;
 
     let sections = state.openai.enrich(&session, &api_key).await?;
     session = persist_complete(&state, id, sections_to_markdown(sections))?;
@@ -243,24 +283,6 @@ fn persist_recording(state: &AppState, id: &str, audio_path: String) -> AppResul
     session.error = None;
     state.store.save(&session)?;
     Ok(session)
-}
-
-fn persist_stopped(state: &AppState, id: &str, audio_path: String) -> AppResult<Session> {
-    let _guard = lock_sessions(state)?;
-    let session = state.store.get(id)?;
-    let processing = transition_to_processing(session.clone(), audio_path.clone())?;
-    if let Err(error) = state.store.save(&processing) {
-        let failed = failed_after_stop_save(session, audio_path, error.clone());
-        let _ = state.store.save(&failed);
-        return Err(error);
-    }
-    Ok(processing)
-}
-
-fn failed_after_stop_save(mut session: Session, audio_path: String, error: AppError) -> Session {
-    session.ended_at.get_or_insert_with(now);
-    session.audio_path = Some(audio_path);
-    transition_to_failed(session, error)
 }
 
 fn prepare_retry(state: &AppState, id: &str) -> AppResult<Session> {
@@ -329,10 +351,10 @@ fn persist_transcript(state: &AppState, id: &str, transcript: String) -> AppResu
     Ok(session)
 }
 
-fn remove_retained_audio(app: &AppHandle, state: &AppState, id: &str) -> AppResult<Session> {
+fn remove_retained_audio(state: &AppState, id: &str) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
     let mut session = state.store.get(id)?;
-    if let Some(path) = retained_audio_path(app, &session)? {
+    if let Some(path) = retained_audio_path(state, &session)? {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -404,23 +426,12 @@ fn audio_path(app: &AppHandle, id: &str) -> AppResult<PathBuf> {
         .map_err(|error| AppError::new("storage_error", error.to_string()))
 }
 
-fn retained_audio_path(app: &AppHandle, session: &Session) -> AppResult<Option<PathBuf>> {
+fn retained_audio_path(state: &AppState, session: &Session) -> AppResult<Option<PathBuf>> {
     session
         .audio_path
         .as_deref()
-        .map(|saved| validate_audio_path(saved, &audio_path(app, &session.id)?))
+        .map(|saved| state.store.validate_audio_path(&session.id, saved))
         .transpose()
-}
-
-fn validate_audio_path(saved: &str, assigned: &std::path::Path) -> AppResult<PathBuf> {
-    let saved = PathBuf::from(saved);
-    if saved != assigned {
-        return Err(AppError::new(
-            "audio_file",
-            "Recorded audio path is invalid",
-        ));
-    }
-    Ok(saved)
 }
 
 fn invalid_status(message: &str) -> AppError {
@@ -443,7 +454,7 @@ fn now() -> String {
 mod tests {
     use std::{
         fs,
-        path::{Path, PathBuf},
+        path::PathBuf,
         sync::{mpsc, Arc},
         thread,
         time::Duration,
@@ -453,6 +464,96 @@ mod tests {
         domain::{AppError, CreateSessionInput, Session, SessionStatus, UpdateSessionInput},
         store::SessionStore,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_rejects_symlinked_audio_before_starting_native_recording() {
+        use std::os::unix::fs::symlink;
+        for destination in ["directory", "file", "dangling"] {
+            let (state, root, id) = state(SessionStatus::Draft);
+            fs::create_dir(root.join("outside")).unwrap();
+            let victim = root.join("outside/victim");
+            if destination != "dangling" {
+                fs::write(&victim, "untouched").unwrap();
+            }
+            let path = root.join("audio").join(format!("{id}.m4a"));
+            if destination == "directory" {
+                symlink(root.join("outside"), root.join("audio")).unwrap();
+            } else {
+                fs::create_dir(root.join("audio")).unwrap();
+                symlink(&victim, &path).unwrap();
+            }
+            let mut started = false;
+            let result = super::start_recording_state(&state, &id, path, |_, _| {
+                started = true;
+                Err(AppError::new("native_reached", "must validate first"))
+            });
+            fs::remove_dir_all(root).unwrap();
+            assert!(
+                !started,
+                "native recorder reached through {destination} symlink"
+            );
+            assert_eq!(result.unwrap_err().code, "invalid_audio_path");
+        }
+    }
+
+    #[cfg(unix)]
+    fn stop_failure_case(fail_save: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let (state, root, id) = state(SessionStatus::Recording);
+        fs::create_dir(root.join("audio")).unwrap();
+        let path = root.join("audio").join(format!("{id}.m4a"));
+        fs::write(&path, "retryable audio").unwrap();
+        let mut recording = state.store.get(&id).unwrap();
+        recording.original_notes = "rent roll".into();
+        recording.audio_path = Some(path.to_string_lossy().into_owned());
+        state.store.save(&recording).unwrap();
+        if fail_save {
+            fs::set_permissions(root.join("sessions"), fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let result = super::stop_recording_state(&state, &id, |_| {
+            if fail_save {
+                Ok(path.clone())
+            } else {
+                Err(AppError::new("audio_capture", "writer finalization failed"))
+            }
+        });
+        fs::set_permissions(root.join("sessions"), fs::Permissions::from_mode(0o700)).unwrap();
+        let saved = state.store.get(&id).unwrap();
+        let audio_kept = path.exists();
+        fs::remove_dir_all(root).unwrap();
+
+        let published =
+            result.expect("stop must return a Failed session after releasing the recorder");
+        assert_eq!(published.status, SessionStatus::Failed);
+        assert_eq!(published.original_notes, "rent roll");
+        assert_eq!(published.audio_path, recording.audio_path);
+        assert!(published.ended_at.is_some());
+        assert_eq!(
+            published.error.unwrap().code,
+            if fail_save {
+                "storage_error"
+            } else {
+                "audio_capture"
+            }
+        );
+        assert!(audio_kept);
+        if !fail_save {
+            assert_eq!(saved.status, SessionStatus::Failed);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_publishes_failed_session_after_recorder_failure() {
+        stop_failure_case(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_publishes_failed_session_when_both_state_saves_fail() {
+        stop_failure_case(true);
+    }
 
     fn state(status: SessionStatus) -> (Arc<super::AppState>, PathBuf, String) {
         let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
@@ -479,14 +580,51 @@ mod tests {
     }
 
     #[test]
-    fn rejects_audio_outside_the_assigned_path() {
-        let error = super::validate_audio_path(
-            "/tmp/not-this-session.m4a",
-            Path::new("/app-data/audio/session-id.m4a"),
-        )
-        .unwrap_err();
+    fn stalled_openai_request_fails_with_retry_data_preserved() {
+        use std::{io::Read, net::TcpListener, time::Instant};
+        let (state, root, id) = state(SessionStatus::Processing);
+        fs::create_dir(root.join("audio")).unwrap();
+        let path = root.join("audio").join(format!("{id}.m4a"));
+        fs::write(&path, "retryable audio").unwrap();
+        let mut session = state.store.get(&id).unwrap();
+        session.original_notes = "rent roll".into();
+        session.audio_path = Some(path.to_string_lossy().into_owned());
+        state.store.save(&session).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = crate::openai::OpenAiClient::with_base_url(format!(
+            "http://{}/v1",
+            listener.local_addr().unwrap()
+        ));
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = release_rx.recv_timeout(Duration::from_secs(13));
+        });
+        let started = Instant::now();
+        let error = tauri::async_runtime::block_on(client.validate_key("disposable-test-value"))
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        let _ = release_tx.send(());
+        server.join().unwrap();
+        let failed = super::persist_failure(&state, &id, error).unwrap();
+        let retry = super::prepare_retry(&state, &id).unwrap();
+        let audio = fs::read_to_string(&path).unwrap();
+        fs::remove_dir_all(root).unwrap();
 
-        assert_eq!(error.code, "audio_file");
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "request stalled for {elapsed:?}"
+        );
+        assert_eq!(failed.status, SessionStatus::Failed);
+        assert_eq!(failed.error.unwrap().code, "openai");
+        assert_eq!(retry.original_notes, "rent roll");
+        assert_eq!(retry.audio_path, session.audio_path);
+        assert_eq!(audio, "retryable audio");
     }
 
     #[test]
@@ -612,26 +750,6 @@ mod tests {
 
         let retry_won = results.contains(&("retry", true));
         assert_eq!(state.store.get(&id).is_ok(), retry_won);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn failed_processing_save_keeps_stopped_audio_retryable() {
-        let (_, root, id) = state(SessionStatus::Recording);
-        let store = SessionStore::new(root.clone());
-        let session = store.get(&id).unwrap();
-        let failed = super::failed_after_stop_save(
-            session,
-            "/app-data/audio/session-id.m4a".into(),
-            AppError::new("storage_error", "disk full"),
-        );
-
-        assert_eq!(failed.status, SessionStatus::Failed);
-        assert_eq!(
-            failed.audio_path.as_deref(),
-            Some("/app-data/audio/session-id.m4a")
-        );
-        assert_eq!(failed.error.unwrap().code, "storage_error");
         fs::remove_dir_all(root).unwrap();
     }
 }
