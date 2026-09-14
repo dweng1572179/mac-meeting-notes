@@ -3,10 +3,7 @@ export function createAutosave<T>(delay: number, save: (value: T) => Promise<voi
   let pending: { value: T } | undefined;
   let queue = Promise.resolve();
 
-  async function savePending() {
-    const current = pending;
-    if (!current) return;
-    pending = undefined;
+  async function saveValue(current: { value: T }) {
     try {
       await save(current.value);
     } catch (error) {
@@ -15,15 +12,15 @@ export function createAutosave<T>(delay: number, save: (value: T) => Promise<voi
     }
   }
 
-  function enqueue(drain: boolean) {
-    const operation = queue.then(async () => {
-      if (!drain) return savePending();
-      while (pending) {
-        clearTimeout(timer);
-        timer = undefined;
-        await savePending();
-      }
-    });
+  async function savePending() {
+    const current = pending;
+    if (!current) return;
+    pending = undefined;
+    await saveValue(current);
+  }
+
+  function enqueue(operationToRun: () => Promise<void>) {
+    const operation = queue.then(operationToRun);
     queue = operation.catch(() => {});
     return operation;
   }
@@ -31,7 +28,13 @@ export function createAutosave<T>(delay: number, save: (value: T) => Promise<voi
   function flush(): Promise<void> {
     clearTimeout(timer);
     timer = undefined;
-    return enqueue(true);
+    return enqueue(async () => {
+      while (pending) {
+        clearTimeout(timer);
+        timer = undefined;
+        await savePending();
+      }
+    });
   }
 
   return {
@@ -40,7 +43,10 @@ export function createAutosave<T>(delay: number, save: (value: T) => Promise<voi
       clearTimeout(timer);
       timer = setTimeout(() => {
         timer = undefined;
-        void enqueue(false).catch(() => {});
+        const due = pending;
+        if (!due) return;
+        pending = undefined;
+        void enqueue(() => saveValue(due)).catch(() => {});
       }, delay);
     },
     flush

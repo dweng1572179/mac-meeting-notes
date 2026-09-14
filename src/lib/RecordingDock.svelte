@@ -91,10 +91,10 @@
         onOpenSettings();
         return;
       }
-      const baseline = performance.now();
       const recording = await startRecording(session.id);
+      const baseline = performance.now();
       recordingStarted = baseline;
-      now = performance.now();
+      now = baseline;
       onRecordingStarted(recording.sessionId, baseline);
       onSessionChange({ ...session, status: 'recording', error: null });
     } catch (error) {

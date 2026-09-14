@@ -99,4 +99,29 @@ describe('createAutosave', () => {
     finishSecond();
     await flushed;
   });
+
+  it('does not let a due timer consume newer input queued behind a blocked save', async () => {
+    vi.useFakeTimers();
+    const saved: string[] = [];
+    let finishFirst!: () => void;
+    const firstSave = new Promise<void>((resolve) => (finishFirst = resolve));
+    const autosave = createAutosave<string>(450, async (draft) => {
+      saved.push(draft);
+      if (draft === 'first') await firstSave;
+    });
+
+    autosave.schedule('first');
+    await vi.advanceTimersByTimeAsync(450);
+    autosave.schedule('due');
+    await vi.advanceTimersByTimeAsync(450);
+    autosave.schedule('newer');
+    finishFirst();
+    for (let step = 0; step < 10; step++) await Promise.resolve();
+
+    expect(saved).toEqual(['first', 'due']);
+    await vi.advanceTimersByTimeAsync(449);
+    expect(saved).toEqual(['first', 'due']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saved).toEqual(['first', 'due', 'newer']);
+  });
 });
