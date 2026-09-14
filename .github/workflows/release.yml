@@ -21,7 +21,12 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: npm run tauri build -- --target aarch64-apple-darwin
-      - run: codesign --verify --deep --strict --verbose=4 "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Meeting Notes.app"
+      - name: Verify packaged app signature
+        run: |
+          mount_dir=$(mktemp -d)
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.1.1_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          codesign --verify --deep --strict --verbose=4 "$mount_dir/Meeting Notes.app"
       - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.1.1_aarch64.dmg" Meeting-Notes.dmg
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
