@@ -34,7 +34,10 @@ fn markdown_omits_empty_sections_and_includes_decisions() {
         action_items: Vec::new(),
     });
 
-    assert_eq!(markdown, "## Decisions\n\n- Pause until the rent roll is verified.\n");
+    assert_eq!(
+        markdown,
+        "## Decisions\n\n- Pause until the rent roll is verified.\n"
+    );
 }
 
 #[test]
@@ -93,7 +96,11 @@ fn enrich_rejects_incomplete_or_non_output_text_responses() {
 
 #[test]
 fn openai_statuses_map_to_stable_error_codes() {
-    for (status, code) in [(401, "invalid_api_key"), (413, "audio_too_large"), (429, "rate_limited")] {
+    for (status, code) in [
+        (401, "invalid_api_key"),
+        (413, "audio_too_large"),
+        (429, "rate_limited"),
+    ] {
         let (base_url, _) = local_server(json_response(status, "{}"));
         let result = tauri::async_runtime::block_on(
             OpenAiClient::with_base_url(base_url).validate_key("test-key"),
