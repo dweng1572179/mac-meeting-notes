@@ -80,7 +80,9 @@ impl SessionStore {
     fn owned_audio_path(&self, audio_path: &str) -> Option<PathBuf> {
         let audio_directory = self.root.join("audio").canonicalize().ok()?;
         let audio_path = PathBuf::from(audio_path).canonicalize().ok()?;
-        audio_path.starts_with(audio_directory).then_some(audio_path)
+        audio_path
+            .starts_with(audio_directory)
+            .then_some(audio_path)
     }
 
     fn read_session(&self, path: PathBuf) -> AppResult<Session> {
@@ -89,7 +91,11 @@ impl SessionStore {
     }
 
     fn validate_id(&self, id: &str) -> AppResult<()> {
-        if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+        if !id.is_empty()
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
             Ok(())
         } else {
             Err(AppError::new("invalid_session_id", "Session ID is invalid"))
@@ -128,7 +134,8 @@ mod tests {
 
     #[test]
     fn sync_directory_succeeds_after_atomic_rename() {
-        let directory = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let temporary = directory.join("session.json.tmp");
         let saved = directory.join("session.json");

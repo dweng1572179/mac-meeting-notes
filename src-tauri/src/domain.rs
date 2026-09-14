@@ -90,7 +90,10 @@ impl Session {
 
     pub fn apply(&mut self, input: UpdateSessionInput) -> AppResult<()> {
         if input.id != self.id {
-            return Err(AppError::new("session_id_mismatch", "Session ID does not match"));
+            return Err(AppError::new(
+                "session_id_mismatch",
+                "Session ID does not match",
+            ));
         }
         self.title = input.title;
         self.context = input.context;

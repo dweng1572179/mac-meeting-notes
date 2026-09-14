@@ -94,15 +94,13 @@ impl OpenAiClient {
             .as_array()
             .and_then(|output| {
                 output.iter().find_map(|item| {
-                    item["content"]
-                        .as_array()
-                        .and_then(|content| {
-                            content.iter().find_map(|part| {
-                                (part["type"] == "output_text")
-                                    .then(|| part["text"].as_str())
-                                    .flatten()
-                            })
+                    item["content"].as_array().and_then(|content| {
+                        content.iter().find_map(|part| {
+                            (part["type"] == "output_text")
+                                .then(|| part["text"].as_str())
+                                .flatten()
                         })
+                    })
                 })
             })
             .ok_or_else(|| AppError::new("openai", "OpenAI returned no enrichment content"))?;
