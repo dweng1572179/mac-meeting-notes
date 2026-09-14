@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v0.1.0']
+    tags: ['v0.1.1']
 
 permissions:
   contents: write
@@ -21,10 +21,11 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: npm run tauri build -- --target aarch64-apple-darwin
-      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.1.0_aarch64.dmg" Meeting-Notes.dmg
+      - run: codesign --verify --deep --strict --verbose=4 "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Meeting Notes.app"
+      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.1.1_aarch64.dmg" Meeting-Notes.dmg
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
           --title "Meeting Notes $GITHUB_REF_NAME"
-          --notes "Unsigned beta: copy Meeting Notes to Applications. On macOS 14, right-click the app and choose Open once. On macOS 15 or later, first try opening the app and dismiss the warning, then go to System Settings → Privacy & Security → Open Anyway and confirm opening Meeting Notes."
+          --notes "Ad-hoc signed beta: copy Meeting Notes to Applications. On macOS 14, right-click the app and choose Open once. On macOS 15 or later, first try opening the app and dismiss the warning, then go to System Settings → Privacy & Security → Open Anyway and confirm opening Meeting Notes."
         env:
           GH_TOKEN: ${{ github.token }}

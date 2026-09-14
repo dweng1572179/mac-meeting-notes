@@ -23,7 +23,7 @@ See OpenAI's [data controls](https://developers.openai.com/api/docs/guides/your-
 - macOS 14.2 or later
 - OpenAI API key with paid API access; API usage is billed by OpenAI
 - System Audio Recording permission
-- One-time unsigned-app approval: right-click **Open** on macOS 14; **Open Anyway** in Privacy & Security on macOS 15 or later
+- One-time unnotarized-app approval: right-click **Open** on macOS 14; **Open Anyway** in Privacy & Security on macOS 15 or later
 
 ## Download
 
@@ -33,7 +33,7 @@ Download the final [`Meeting-Notes.dmg`](https://github.com/dweng1572179/mac-mee
 
 1. Open `Meeting-Notes.dmg` and drag **Meeting Notes** to **Applications**.
 2. If Meeting Notes already exists in Applications, choose **Replace**. Never choose **Keep Both**, which creates duplicate app copies.
-3. Approve the unsigned beta once. On **macOS 14**, right-click **Meeting Notes**, choose **Open**, then confirm **Open**. On **macOS 15 or later**, first try opening Meeting Notes from Applications and dismiss the warning, then open **System Settings → Privacy & Security → Open Anyway** and confirm opening Meeting Notes.
+3. Approve the unnotarized beta once. On **macOS 14**, right-click **Meeting Notes**, choose **Open**, then confirm **Open**. On **macOS 15 or later**, first try opening Meeting Notes from Applications and dismiss the warning, then open **System Settings → Privacy & Security → Open Anyway** and confirm opening Meeting Notes.
 4. Add your OpenAI API key in the app's settings and grant System Audio Recording permission when prompted.
 
 Future launches work normally from Applications.
@@ -65,7 +65,7 @@ Meeting metadata, original notes, transcripts, and enhanced notes are stored loc
 
 - Version 1 captures system audio only, not microphone input.
 - Transcription and enrichment require internet access and paid OpenAI API access.
-- This beta is unsigned and not notarized. macOS 14 requires a one-time right-click **Open**; macOS 15 or later requires trying the first launch, then **System Settings → Privacy & Security → Open Anyway**.
+- This beta is ad-hoc signed but not notarized. macOS 14 requires a one-time right-click **Open**; macOS 15 or later requires trying the first launch, then **System Settings → Privacy & Security → Open Anyway**.
 - Model output can be incomplete or wrong; review enhanced notes against the Original view.
 
 ## License
