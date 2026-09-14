@@ -1,3 +1,9 @@
+<script module lang="ts">
+  export function elapsedRecordingSeconds(startedAt: number, now: number) {
+    return Math.max(0, Math.floor((now - startedAt) / 1000));
+  }
+</script>
+
 <script lang="ts">
   import { onMount } from 'svelte';
   import { retryProcessing, startRecording, stopRecording } from './api';
@@ -6,12 +12,16 @@
   let {
     session,
     hasApiKey,
+    recordingStartedAt,
+    onRecordingStarted,
     onFlush,
     onSessionChange,
     onOpenSettings
   }: {
     session: Session;
     hasApiKey: boolean;
+    recordingStartedAt: number | null;
+    onRecordingStarted: (id: string, baseline: number) => void;
     onFlush: () => Promise<void>;
     onSessionChange: (session: Session) => void;
     onOpenSettings: () => void;
@@ -20,13 +30,23 @@
   let pending = $state<'start' | 'stop' | 'retry' | null>(null);
   let actionError = $state('');
   let now = $state(0);
-  let recordingStarted = $state<number | null>(null);
+  const initial = <T,>(read: () => T) => read();
+  let recordingStarted = $state(initial(() => recordingStartedAt));
 
   $effect(() => {
-    if (session.status === 'recording' && recordingStarted === null) {
-      recordingStarted = performance.now();
-      now = recordingStarted;
-    } else if (session.status !== 'recording') {
+    if (session.status === 'recording') {
+      if (
+        recordingStartedAt !== null &&
+        (recordingStarted === null || recordingStartedAt < recordingStarted)
+      ) {
+        recordingStarted = recordingStartedAt;
+        now = Math.max(now, performance.now());
+      } else if (recordingStarted === null) {
+        recordingStarted = performance.now();
+        now = recordingStarted;
+        onRecordingStarted(session.id, recordingStarted);
+      }
+    } else {
       recordingStarted = null;
     }
   });
@@ -38,7 +58,7 @@
     return () => window.clearInterval(timer);
   });
 
-  const elapsed = () => Math.max(0, Math.floor((now - (recordingStarted ?? now)) / 1000));
+  const elapsed = () => elapsedRecordingSeconds(recordingStarted ?? now, now);
   const elapsedLabel = () => {
     const seconds = elapsed();
     const hours = Math.floor(seconds / 3600);
@@ -71,9 +91,11 @@
         onOpenSettings();
         return;
       }
-      await startRecording(session.id);
-      recordingStarted = performance.now();
-      now = recordingStarted;
+      const baseline = performance.now();
+      const recording = await startRecording(session.id);
+      recordingStarted = baseline;
+      now = performance.now();
+      onRecordingStarted(recording.sessionId, baseline);
       onSessionChange({ ...session, status: 'recording', error: null });
     } catch (error) {
       actionError = message(error);
@@ -110,10 +132,11 @@
 </script>
 
 {#if session.status === 'recording'}
-  <div class="recording-dock live" role="status" aria-label="Meeting recording in progress">
+  <div class="recording-dock live" aria-label="Meeting recording in progress">
+    <span class="sr-only" role="status">Recording started.</span>
     <span class="recording-dot" aria-hidden="true"></span>
     <span>Recording</span>
-    <time>{elapsedLabel()}</time>
+    <time aria-label={`Elapsed recording time ${elapsedLabel()}`}>{elapsedLabel()}</time>
     <button type="button" disabled={pending !== null} onclick={stop}>
       {pending === 'stop' ? 'Stopping…' : 'Stop'}
     </button>
@@ -133,6 +156,9 @@
   </div>
 {:else if session.status === 'draft' || session.status === 'failed'}
   <div class="recording-dock draft">
+    {#if session.status === 'failed'}
+      <span class="failed-start-message" role="alert">{session.error?.message ?? 'Recording could not start.'}</span>
+    {/if}
     <button class="start-meeting" type="button" disabled={pending !== null} onclick={start}>
       <span aria-hidden="true"></span>
       {pending === 'start' ? 'Starting…' : 'Start meeting'}

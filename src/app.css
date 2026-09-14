@@ -408,6 +408,7 @@ main {
 
 .recording-dock.draft { padding-left: 7px; }
 .recording-dock.draft button { color: #fff; background: transparent; }
+.failed-start-message { max-width: 360px; padding-left: 8px; color: #f2b3a8; font-weight: 500; }
 .recording-dock.live time { min-width: 40px; color: #d4d2c9; font-variant-numeric: tabular-nums; font-weight: 500; }
 .recording-dock.live button { color: var(--ink); background: #fff; }
 .recording-dot { animation: recording-pulse 1.6s ease-out infinite; }

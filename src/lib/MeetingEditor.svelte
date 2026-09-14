@@ -1,3 +1,20 @@
+<script module lang="ts">
+  import type { SessionStatus } from './types';
+
+  export type MeetingView = 'original' | 'enhanced';
+
+  export function nextMeetingView(
+    current: MeetingView,
+    previousStatus: SessionStatus,
+    nextStatus: SessionStatus,
+    originalUsedWhileProcessing: boolean
+  ): MeetingView {
+    return previousStatus === 'processing' && nextStatus === 'complete' && !originalUsedWhileProcessing
+      ? 'enhanced'
+      : current;
+  }
+</script>
+
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import {
@@ -13,11 +30,15 @@
   let {
     session,
     hasApiKey,
+    recordingStartedAt,
+    onRecordingStarted,
     onSessionChange,
     onOpenSettings
   }: {
     session: Session;
     hasApiKey: boolean;
+    recordingStartedAt: number | null;
+    onRecordingStarted: (id: string, baseline: number) => void;
     onSessionChange: (session: Session) => void;
     onOpenSettings: () => void;
   } = $props();
@@ -27,11 +48,12 @@
   let context = $state(initial(() => session.context));
   let attendees = $state(initial(() => session.attendees.join(', ')));
   let originalNotes = $state(initial(() => session.originalNotes));
-  let view = $state<'original' | 'enhanced'>(
+  let view = $state<MeetingView>(
     initial(() => (session.status === 'complete' ? 'enhanced' : 'original'))
   );
   let saveStatus = $state('');
   let lastStatus = initial(() => session.status);
+  let originalUsedWhileProcessing = false;
 
   const autosave = createAutosave<UpdateSessionInput>(450, async (input) => {
     saveStatus = 'Saving…';
@@ -45,7 +67,11 @@
   });
 
   $effect(() => {
-    if (session.status === 'complete' && lastStatus !== 'complete') view = 'enhanced';
+    if (session.status === 'processing' && lastStatus !== 'processing') {
+      originalUsedWhileProcessing = document.activeElement?.id === 'original-notes';
+    }
+    view = nextMeetingView(view, lastStatus, session.status, originalUsedWhileProcessing);
+    if (session.status !== 'processing') originalUsedWhileProcessing = false;
     lastStatus = session.status;
   });
 
@@ -103,8 +129,13 @@
   }
 
   function updateNotes(event: Event) {
+    markOriginalUse();
     originalNotes = (event.currentTarget as HTMLTextAreaElement).value;
     scheduleSave();
+  }
+
+  function markOriginalUse() {
+    if (session.status === 'processing') originalUsedWhileProcessing = true;
   }
 
   export async function flush() {
@@ -117,10 +148,11 @@
     );
 </script>
 
-<article class="meeting-document" aria-labelledby="meeting-title-label">
+<article class="meeting-document" aria-labelledby="meeting-heading">
   <header class="document-header">
+    <h1 class="sr-only" id="meeting-heading">{title || 'Untitled meeting'}</h1>
     <time class="meeting-date" datetime={session.startedAt}>{meetingDate(session.startedAt)}</time>
-    <label class="sr-only" id="meeting-title-label" for="meeting-title">Meeting title</label>
+    <label class="sr-only" id="meeting-title-label" for="meeting-title">Title</label>
     <textarea
       class="meeting-title-input"
       id="meeting-title"
@@ -191,6 +223,7 @@
         id="original-notes"
         value={originalNotes}
         oninput={updateNotes}
+        onfocus={markOriginalUse}
         placeholder="Start with the questions, numbers, and decisions you want to remember."
         spellcheck="true"
       ></textarea>
@@ -204,6 +237,8 @@
   <RecordingDock
     {session}
     {hasApiKey}
+    {recordingStartedAt}
+    {onRecordingStarted}
     onFlush={flush}
     {onSessionChange}
     {onOpenSettings}

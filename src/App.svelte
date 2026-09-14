@@ -14,6 +14,7 @@
   let creating = $state(false);
   let error = $state('');
   let editor = $state<{ flush: () => Promise<void> } | undefined>();
+  let recordingBaselines = $state<Record<string, number>>({});
   let selected = $derived(sessions.find((session) => session.id === selectedId) ?? null);
 
   onMount(() => {
@@ -49,9 +50,20 @@
   }
 
   function updateSession(updated: Session) {
+    if (updated.status !== 'recording' && recordingBaselines[updated.id] !== undefined) {
+      const { [updated.id]: _finished, ...active } = recordingBaselines;
+      recordingBaselines = active;
+    }
     sessions = sessions.some(({ id }) => id === updated.id)
       ? sessions.map((session) => (session.id === updated.id ? updated : session))
       : [updated, ...sessions];
+  }
+
+  function rememberRecordingStart(id: string, baseline: number) {
+    const current = recordingBaselines[id];
+    if (current === undefined || baseline < current) {
+      recordingBaselines = { ...recordingBaselines, [id]: baseline };
+    }
   }
 
   async function selectSession(id: string | null) {
@@ -90,6 +102,8 @@
           bind:this={editor}
           session={selected}
           {hasApiKey}
+          recordingStartedAt={recordingBaselines[selected.id] ?? null}
+          onRecordingStarted={rememberRecordingStart}
           onSessionChange={updateSession}
           onOpenSettings={() => (settingsOpen = true)}
         />
