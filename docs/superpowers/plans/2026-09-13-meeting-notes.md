@@ -19,7 +19,7 @@
 - Use `gpt-4o-mini-transcribe` for transcription and `gpt-6-astra` through `POST /v1/responses` for enrichment, with `store: false`.
 - Preserve original notes exactly, keep Original and Enhanced views separate, and retain failed audio for retry.
 - Delete raw audio after successful transcription.
-- Closely match Granola's public desktop layout and interactions without using its name, logo, artwork, source code, or proprietary assets.
+- Use an original, independent desktop meeting-notes layout and interactions without third-party names, logos, artwork, source code, or proprietary assets.
 - Ship an MIT-licensed public repository and one unsigned `Meeting-Notes.dmg`; document the one-time right-click Open step.
 
 ## File Map
@@ -107,7 +107,7 @@ Use Tauri package versions compatible with v2, Svelte 5, Vite, TypeScript, and `
 
 The initial capability grants only core window/event access; filesystem, shell, and HTTP access stay in Rust.
 
-Create a simple independent SVG app icon: a warm-paper rounded square, one dark vertical note line, and one olive recording dot. It must contain no Granola shapes, wordmark, or artwork.
+Create a simple independent SVG app icon: a warm-paper rounded square, one dark vertical note line, and one olive recording dot. It must contain no third-party shapes, wordmark, or artwork.
 
 - [ ] **Step 3: Write the failing Rust identity check**
 
@@ -568,7 +568,7 @@ git commit -m "feat: connect capture to durable processing"
 
 ---
 
-### Task 6: Granola-Like Library and Settings UI
+### Task 6: Independent Library and Settings UI
 
 **Files:**
 - Create: `src/lib/types.ts`
@@ -644,7 +644,7 @@ npm run build
 npm run dev -- --host 127.0.0.1
 ```
 
-Open `http://127.0.0.1:5173`, capture 1440×1000 and 1100×760 screenshots, compare sidebar width, document measure, typography hierarchy, spacing, controls, and empty space to the public Granola references, then stop the dev server.
+Open `http://127.0.0.1:5173`, capture 1440×1000 and 1100×760 screenshots, compare sidebar width, document measure, typography hierarchy, spacing, controls, and empty space to the approved independent meeting-notes design requirements, then stop the dev server.
 
 - [ ] **Step 7: Commit**
 
@@ -832,7 +832,7 @@ git commit -m "fix: preserve meetings through failures and restart"
 
 - [ ] **Step 2: Verify the independent bundle identity**
 
-Inspect the Task 1 icon and bundle metadata to confirm they contain no Granola shapes, wordmark, artwork, or bundle identifiers. Regenerate the committed icon sizes from the independent SVG:
+Inspect the Task 1 icon and bundle metadata to confirm they contain no third-party shapes, wordmark, artwork, or bundle identifiers. Regenerate the committed icon sizes from the independent SVG:
 
 ```bash
 npx tauri icon src-tauri/icons/icon.svg
@@ -852,7 +852,7 @@ README sections: What it does, Privacy, Requirements, Download, First launch, Bu
 name: Release
 on:
   push:
-    tags: ['v*']
+    tags: ['v0.1.0']
 permissions:
   contents: write
 jobs:

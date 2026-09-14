@@ -4,7 +4,7 @@
 
 Build and publish a small, open-source macOS app that records computer audio while the user writes sparse notes, then uses the user's OpenAI API key to transcribe the meeting and enrich those notes. A user should download one DMG, open the app, enter an API key, and start a meeting without installing a meeting bot or running a server.
 
-The app is named **Meeting Notes** and the public repository is named `mac-meeting-notes`. It is an independent implementation: the interaction and visual structure closely follow Granola's publicly documented desktop experience, but the app does not use Granola's name, logo, artwork, source code, or other proprietary assets.
+The app is named **Meeting Notes** and the public repository is named `mac-meeting-notes`. It uses an original, independent meeting-notes interaction and visual design and contains no third-party branding, artwork, source code, or proprietary assets.
 
 ## Success Criteria
 
@@ -23,7 +23,7 @@ The app is named **Meeting Notes** and the public repository is named `mac-meeti
 - Microphone capture or mixing multiple audio sources in v1.
 - Offline transcription or bundled AI models.
 - Importing prerecorded audio or transcripts as the primary workflow.
-- Copying Granola branding or proprietary assets.
+- Copying third-party branding or proprietary assets.
 - Apple Developer signing and notarization for the first release.
 
 ## Architecture
@@ -106,7 +106,7 @@ The UI keeps **Original** and **Enhanced** views so generated text never overwri
 
 ## Interface Design
 
-The app closely mirrors the publicly visible Granola desktop interaction without using Granola branding:
+The app uses an original, independent desktop meeting-notes design:
 
 - A warm off-white, rounded application canvas.
 - A narrow utility sidebar for search, Home, recent sessions, Settings, and New note.
@@ -162,5 +162,5 @@ No factual property detail is claimed in this test; all people, property details
 
 - [Tauri architecture](https://v2.tauri.app/concept/architecture/)
 - [Apple: Capturing system audio with Core Audio taps](https://developer.apple.com/documentation/coreaudio/capturing-system-audio-with-core-audio-taps)
-- [Granola: Writing your own notes](https://docs.granola.ai/help-center/taking-notes/taking-notes-in-granola)
-- [Granola: AI-enhanced notes](https://docs.granola.ai/help-center/taking-notes/ai-enhanced-notes)
+- [OpenAI: Audio transcription](https://developers.openai.com/api/docs/guides/speech-to-text)
+- [OpenAI: Responses API](https://developers.openai.com/api/reference/responses/overview)
