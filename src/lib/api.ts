@@ -90,7 +90,24 @@ export async function hasApiKey(): Promise<boolean> {
   return invoke<boolean>('has_api_key');
 }
 
-export async function onSessionUpdated(handler: (session: Session) => void): Promise<UnlistenFn> {
+export function disposeAsyncListener(registration: Promise<UnlistenFn>): UnlistenFn {
+  let active = true;
+  let unlisten: UnlistenFn | undefined;
+
+  registration.then((stop) => {
+    if (active) unlisten = stop;
+    else stop();
+  });
+
+  return () => {
+    if (!active) return;
+    active = false;
+    unlisten?.();
+    unlisten = undefined;
+  };
+}
+
+export function onSessionUpdated(handler: (session: Session) => void): UnlistenFn {
   if (!isNative()) return () => {};
-  return listen<Session>('session-updated', ({ payload }) => handler(payload));
+  return disposeAsyncListener(listen<Session>('session-updated', ({ payload }) => handler(payload)));
 }

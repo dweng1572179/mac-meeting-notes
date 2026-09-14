@@ -15,8 +15,6 @@
   let selected = $derived(sessions.find((session) => session.id === selectedId) ?? null);
 
   onMount(() => {
-    let unlisten = () => {};
-
     bootstrap()
       .then((data) => {
         sessions = [...data.sessions].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
@@ -28,11 +26,11 @@
       })
       .finally(() => (loading = false));
 
-    onSessionUpdated((updated) => {
+    const unlisten = onSessionUpdated((updated) => {
       sessions = sessions.some(({ id }) => id === updated.id)
         ? sessions.map((session) => (session.id === updated.id ? updated : session))
         : [updated, ...sessions];
-    }).then((stop) => (unlisten = stop));
+    });
 
     return () => unlisten();
   });
@@ -125,5 +123,9 @@
 </div>
 
 {#if settingsOpen}
-  <SettingsDialog {hasApiKey} onClose={() => (settingsOpen = false)} />
+  <SettingsDialog
+    {hasApiKey}
+    onSaved={() => (hasApiKey = true)}
+    onClose={() => (settingsOpen = false)}
+  />
 {/if}
