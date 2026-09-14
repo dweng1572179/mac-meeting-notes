@@ -22,6 +22,7 @@ impl SessionStore {
         if !directory.exists() {
             return Ok(Vec::new());
         }
+        self.cleanup_deletions();
 
         let mut sessions = Vec::new();
         for entry in fs::read_dir(directory).map_err(io_error)? {
@@ -65,48 +66,23 @@ impl SessionStore {
 
     pub fn delete(&self, id: &str) -> AppResult<()> {
         let session = self.get(id)?;
-        let audio_path = session
-            .audio_path
-            .as_deref()
-            .map(|path| self.validate_audio_path(id, path))
-            .transpose()?;
-        let staged_audio = audio_path
-            .filter(|path| path.exists())
-            .map(|path| (path.clone(), path.with_extension("m4a.deleting")));
-        if let Some((path, staged)) = &staged_audio {
-            if staged.exists() {
-                return Err(AppError::new(
-                    "storage_error",
-                    "A prior audio deletion still needs recovery",
-                ));
-            }
-            fs::rename(path, staged).map_err(io_error)?;
+        if let Some(path) = session.audio_path.as_deref() {
+            self.validate_audio_path(id, path)?;
         }
 
-        let session_path = self.sessions_dir().join(format!("{id}.json"));
-        if let Err(error) = fs::remove_file(&session_path) {
-            if let Some((path, staged)) = &staged_audio {
-                fs::rename(staged, path).map_err(|rollback| {
-                    AppError::new(
-                        "storage_error",
-                        format!("{error}; audio rollback failed: {rollback}"),
-                    )
-                })?;
-            }
-            return Err(io_error(error));
+        let sessions_directory = self.sessions_dir();
+        let session_path = sessions_directory.join(format!("{id}.json"));
+        let tombstone_path = sessions_directory.join(format!("{id}.json.deleting"));
+        if tombstone_path.exists() {
+            return Err(AppError::new(
+                "storage_error",
+                "A prior meeting deletion still needs cleanup",
+            ));
         }
+        fs::rename(session_path, &tombstone_path).map_err(io_error)?;
 
-        if let Some((path, staged)) = staged_audio {
-            if let Err(error) = fs::remove_file(&staged) {
-                fs::rename(&staged, &path).map_err(|rollback| {
-                    AppError::new(
-                        "storage_error",
-                        format!("{error}; audio rollback failed: {rollback}"),
-                    )
-                })?;
-                self.save(&session)?;
-                return Err(io_error(error));
-            }
+        if sync_directory(&sessions_directory).is_ok() {
+            let _ = self.cleanup_deletion(id, &tombstone_path);
         }
         Ok(())
     }
@@ -139,6 +115,50 @@ impl SessionStore {
             return Err(invalid_audio_path());
         }
         Ok(audio_path)
+    }
+
+    fn cleanup_deletions(&self) {
+        let directory = self.sessions_dir();
+        let Ok(entries) = fs::read_dir(&directory) else {
+            return;
+        };
+        if sync_directory(&directory).is_err() {
+            return;
+        }
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(id) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".json.deleting"))
+            else {
+                continue;
+            };
+            let _ = self.cleanup_deletion(id, &path);
+        }
+    }
+
+    fn cleanup_deletion(&self, id: &str, tombstone_path: &Path) -> AppResult<()> {
+        self.validate_id(id)?;
+        let session = self.read_session(tombstone_path.to_owned())?;
+        if session.id != id {
+            return Err(AppError::new(
+                "invalid_session_id",
+                "Deletion marker does not match its session",
+            ));
+        }
+        if let Some(audio_path) = session.audio_path.as_deref() {
+            let audio_path = self.validate_audio_path(id, audio_path)?;
+            match fs::remove_file(audio_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error)),
+            }
+            sync_directory(&self.root.join("audio"))?;
+        }
+        fs::remove_file(tombstone_path).map_err(io_error)?;
+        let _ = sync_directory(&self.sessions_dir());
+        Ok(())
     }
 
     fn read_session(&self, path: PathBuf) -> AppResult<Session> {

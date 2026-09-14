@@ -180,6 +180,81 @@ fn delete_restores_audio_when_session_removal_fails() {
 
 #[cfg(unix)]
 #[test]
+fn delete_commits_and_defers_cleanup_when_audio_removal_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let audio_dir = root.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    let audio_path = audio_dir.join(format!("{}.m4a", session.id));
+    std::fs::write(&audio_path, "retryable audio").unwrap();
+    session.audio_path = Some(audio_path.to_string_lossy().into_owned());
+    store.save(&session).unwrap();
+    let session_path = root.join("sessions").join(format!("{}.json", session.id));
+    std::fs::set_permissions(&audio_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let result = store.delete(&session.id);
+    let deletion_committed = !session_path.exists();
+    let audio_retained = audio_path.exists();
+    std::fs::set_permissions(&audio_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sessions_after_cleanup = store.list().unwrap();
+    let deferred_audio_removed = !audio_path.exists();
+    std::fs::remove_dir_all(root).unwrap();
+
+    assert!(result.is_ok());
+    assert!(deletion_committed);
+    assert!(audio_retained);
+    assert!(sessions_after_cleanup.is_empty());
+    assert!(deferred_audio_removed);
+}
+
+#[cfg(unix)]
+#[test]
+fn next_store_access_finishes_a_committed_tombstone_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let audio_dir = root.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    let audio_path = audio_dir.join(format!("{}.m4a", session.id));
+    std::fs::write(&audio_path, "retryable audio").unwrap();
+    session.audio_path = Some(audio_path.to_string_lossy().into_owned());
+    store.save(&session).unwrap();
+    let sessions_dir = root.join("sessions");
+    let session_path = sessions_dir.join(format!("{}.json", session.id));
+    let tombstone_path = sessions_dir.join(format!("{}.json.deleting", session.id));
+    std::fs::rename(&session_path, &tombstone_path).unwrap();
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let sessions_during_deferred_cleanup = store.list().unwrap();
+    let audio_removed = !audio_path.exists();
+    let tombstone_retained = tombstone_path.exists();
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sessions_after_cleanup = store.list().unwrap();
+    let tombstone_removed = !tombstone_path.exists();
+    std::fs::remove_dir_all(root).unwrap();
+
+    assert!(sessions_during_deferred_cleanup.is_empty());
+    assert!(audio_removed);
+    assert!(tombstone_retained);
+    assert!(sessions_after_cleanup.is_empty());
+    assert!(tombstone_removed);
+}
+
+#[cfg(unix)]
+#[test]
 fn delete_rejects_an_audio_directory_symlinked_outside_app_data() {
     use std::os::unix::fs::symlink;
 
