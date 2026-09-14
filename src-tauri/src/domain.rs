@@ -102,3 +102,26 @@ impl Session {
         Ok(())
     }
 }
+
+pub fn transition_to_processing(
+    mut session: Session,
+    audio_path: impl Into<String>,
+) -> AppResult<Session> {
+    if session.status != SessionStatus::Recording {
+        return Err(AppError::new(
+            "invalid_session_status",
+            "Only a recording session can be processed",
+        ));
+    }
+    session.ended_at = Some(Utc::now().to_rfc3339_opts(SecondsFormat::AutoSi, true));
+    session.audio_path = Some(audio_path.into());
+    session.status = SessionStatus::Processing;
+    session.error = None;
+    Ok(session)
+}
+
+pub fn transition_to_failed(mut session: Session, error: AppError) -> Session {
+    session.status = SessionStatus::Failed;
+    session.error = Some(error);
+    session
+}
