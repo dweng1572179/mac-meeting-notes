@@ -103,11 +103,13 @@ impl Recorder {
         }
 
         #[cfg(target_os = "macos")]
-        let result = slot
-            .recording
-            .take()
-            .ok_or_else(|| AppError::new("recorder_state", "Recording resources are missing"))?
-            .stop();
+        let result = match slot.recording.take() {
+            Some(recording) => recording.stop(),
+            None => Err(AppError::new(
+                "recorder_state",
+                "Recording resources are missing",
+            )),
+        };
 
         #[cfg(not(target_os = "macos"))]
         let result = Err(AppError::new(
@@ -148,7 +150,7 @@ mod native {
         ffi::{c_void, CStr},
         path::{Path, PathBuf},
         ptr::{self, NonNull},
-        sync::atomic::{AtomicBool, AtomicI32, Ordering},
+        sync::atomic::{AtomicI32, AtomicUsize, Ordering},
     };
 
     use objc2::{rc::Retained, AnyThread};
@@ -182,6 +184,7 @@ mod native {
 
     const NO_ERR: i32 = 0;
     const AAC_BIT_RATE: u32 = 48_000;
+    const CALLBACK_GATE_CLOSED: usize = 1 << (usize::BITS - 1);
 
     pub(super) struct NativeRecording {
         path: PathBuf,
@@ -194,20 +197,69 @@ mod native {
     }
 
     // SAFETY: ownership moves only under Recorder's mutex. Core Audio accesses CallbackState
-    // through its stable Box; cleanup disables that callback before touching owned resources.
+    // through its stable Box; cleanup closes its gate and drains admitted callbacks before dispose.
     unsafe impl Send for NativeRecording {}
 
     struct CallbackState {
         file: ExtAudioFileRef,
         bytes_per_frame: u32,
-        active: AtomicBool,
+        gate: CallbackGate,
         write_status: AtomicI32,
     }
 
-    // SAFETY: file and bytes_per_frame are immutable during capture; active/write_status are
+    // SAFETY: file and bytes_per_frame are immutable during capture; gate/write_status are
     // atomic, and ExtAudioFileWriteAsync is explicitly supported from real-time callbacks.
     unsafe impl Send for CallbackState {}
     unsafe impl Sync for CallbackState {}
+
+    #[derive(Default)]
+    pub(super) struct CallbackGate {
+        state: AtomicUsize,
+    }
+
+    pub(super) struct CallbackLease<'a> {
+        gate: &'a CallbackGate,
+    }
+
+    impl CallbackGate {
+        pub(super) fn try_enter(&self) -> Option<CallbackLease<'_>> {
+            let mut state = self.state.load(Ordering::Acquire);
+            loop {
+                if state & CALLBACK_GATE_CLOSED != 0 || state == CALLBACK_GATE_CLOSED - 1 {
+                    return None;
+                }
+                match self.state.compare_exchange_weak(
+                    state,
+                    state + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Some(CallbackLease { gate: self }),
+                    Err(current) => state = current,
+                }
+            }
+        }
+
+        pub(super) fn disable(&self) {
+            self.state.fetch_or(CALLBACK_GATE_CLOSED, Ordering::AcqRel);
+        }
+
+        pub(super) fn is_idle(&self) -> bool {
+            self.state.load(Ordering::Acquire) & !CALLBACK_GATE_CLOSED == 0
+        }
+
+        fn wait_for_idle(&self) {
+            while !self.is_idle() {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    impl Drop for CallbackLease<'_> {
+        fn drop(&mut self) {
+            self.gate.state.fetch_sub(1, Ordering::Release);
+        }
+    }
 
     impl NativeRecording {
         pub(super) fn start(path: &Path) -> AppResult<Self> {
@@ -291,7 +343,7 @@ mod native {
             self.callback = Some(Box::new(CallbackState {
                 file: self.file,
                 bytes_per_frame: tap_format.mBytesPerFrame,
-                active: AtomicBool::new(true),
+                gate: CallbackGate::default(),
                 write_status: AtomicI32::new(NO_ERR),
             }));
             let callback = self.callback.as_mut().expect("callback was just set");
@@ -329,7 +381,7 @@ mod native {
         unsafe fn cleanup(&mut self) -> Vec<AppError> {
             let mut errors = Vec::new();
             if let Some(callback) = &self.callback {
-                callback.active.store(false, Ordering::Release);
+                callback.gate.disable();
             }
 
             if self.started {
@@ -347,6 +399,9 @@ mod native {
                 callback_may_run = status != NO_ERR;
                 collect_status(&mut errors, "AudioDeviceDestroyIOProcID", status);
                 self.io_proc_id = None;
+            }
+            if let Some(callback) = &self.callback {
+                callback.gate.wait_for_idle();
             }
             if self.aggregate_id != 0 {
                 collect_status(
@@ -408,9 +463,9 @@ mod native {
         let Some(state) = client_data.cast::<CallbackState>().as_ref() else {
             return NO_ERR;
         };
-        if !state.active.load(Ordering::Acquire) {
+        let Some(_lease) = state.gate.try_enter() else {
             return NO_ERR;
-        }
+        };
 
         let list = input.as_ref();
         let Some(first_buffer) = list.mBuffers.first() else {
@@ -809,5 +864,39 @@ mod tests {
         let error = slot.release("second").unwrap_err();
         assert_eq!(error.code, "recording_session_mismatch");
         assert_eq!(slot.session_id.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn a_failed_stop_releases_the_recorder_slot() {
+        let recorder = Recorder::new();
+        recorder.slot.lock().unwrap().reserve("first").unwrap();
+
+        let error = recorder.stop("first").unwrap_err();
+
+        assert_eq!(error.code, "recorder_state");
+        assert!(!recorder.is_recording());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn disabled_callback_gate_rejects_new_work() {
+        let gate = native::CallbackGate::default();
+
+        gate.disable();
+
+        assert!(gate.try_enter().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn callback_gate_tracks_work_that_entered_before_disable() {
+        let gate = native::CallbackGate::default();
+        let lease = gate.try_enter().unwrap();
+
+        gate.disable();
+
+        assert!(!gate.is_idle());
+        drop(lease);
+        assert!(gate.is_idle());
     }
 }
