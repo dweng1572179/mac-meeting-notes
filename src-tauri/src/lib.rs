@@ -1,5 +1,6 @@
 pub mod domain;
 pub mod openai;
+pub mod recorder;
 pub mod secrets;
 pub mod store;
 
