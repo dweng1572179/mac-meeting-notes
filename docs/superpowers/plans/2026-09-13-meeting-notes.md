@@ -19,7 +19,7 @@
 - Use `gpt-4o-mini-transcribe` for transcription and `gpt-6-astra` through `POST /v1/responses` for enrichment, with `store: false`.
 - Preserve original notes exactly, keep Original and Enhanced views separate, and retain failed audio for retry.
 - Delete raw audio after successful transcription.
-- Use an original, independent desktop meeting-notes layout and interactions without third-party names, logos, artwork, source code, or proprietary assets.
+- Use an original, independent desktop meeting-notes layout and interactions. Do not use the branding, assets, domains, or identifiers of another meeting-notes product; truthful technology and service names remain allowed.
 - Ship an MIT-licensed public repository and one unsigned `Meeting-Notes.dmg`; document the one-time right-click Open step.
 
 ## File Map
