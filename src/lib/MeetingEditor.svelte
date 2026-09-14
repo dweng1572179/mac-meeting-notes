@@ -18,6 +18,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import {
+    createCloseHandler,
     destroyCurrentWindow,
     onWindowCloseRequested,
     saveSession
@@ -84,19 +85,9 @@
     lastStatus = session.status;
   });
 
-  onMount(() => {
-    let closing = false;
-    return onWindowCloseRequested(async () => {
-      if (closing) return;
-      closing = true;
-      try {
-        await flush();
-        await destroyCurrentWindow();
-      } catch {
-        closing = false;
-      }
-    });
-  });
+  onMount(() =>
+    onWindowCloseRequested(createCloseHandler(flush, destroyCurrentWindow))
+  );
 
   onDestroy(() => void autosave.flush().catch(() => {}));
 

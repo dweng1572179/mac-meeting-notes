@@ -17,3 +17,25 @@ test('disposes a listener that registers after its owner is disposed', async () 
   dispose();
   assert.equal(unlistenCalls, 1);
 });
+
+test('close waits for pending notes before destroying the native window', async () => {
+  let finishSave;
+  const saveFinished = new Promise((resolve) => (finishSave = resolve));
+  const order = [];
+  const close = api.createCloseHandler(
+    async () => {
+      order.push('save-started');
+      await saveFinished;
+      order.push('save-finished');
+    },
+    async () => order.push('destroyed')
+  );
+
+  const closing = close();
+  await Promise.resolve();
+  assert.deepEqual(order, ['save-started']);
+  finishSave();
+  await closing;
+
+  assert.deepEqual(order, ['save-started', 'save-finished', 'destroyed']);
+});

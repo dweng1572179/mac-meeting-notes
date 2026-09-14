@@ -48,6 +48,9 @@ impl SessionStore {
 
     pub fn save(&self, session: &Session) -> AppResult<()> {
         self.validate_id(&session.id)?;
+        if let Some(path) = session.audio_path.as_deref() {
+            self.validate_audio_path(&session.id, path)?;
+        }
         let directory = self.sessions_dir();
         fs::create_dir_all(&directory).map_err(io_error)?;
         let json = serde_json::to_vec_pretty(session).map_err(json_error)?;
@@ -62,14 +65,49 @@ impl SessionStore {
 
     pub fn delete(&self, id: &str) -> AppResult<()> {
         let session = self.get(id)?;
-        if let Some(audio_path) = session
+        let audio_path = session
             .audio_path
             .as_deref()
-            .and_then(|path| self.owned_audio_path(path))
-        {
-            fs::remove_file(audio_path).map_err(io_error)?;
+            .map(|path| self.validate_audio_path(id, path))
+            .transpose()?;
+        let staged_audio = audio_path
+            .filter(|path| path.exists())
+            .map(|path| (path.clone(), path.with_extension("m4a.deleting")));
+        if let Some((path, staged)) = &staged_audio {
+            if staged.exists() {
+                return Err(AppError::new(
+                    "storage_error",
+                    "A prior audio deletion still needs recovery",
+                ));
+            }
+            fs::rename(path, staged).map_err(io_error)?;
         }
-        fs::remove_file(self.sessions_dir().join(format!("{id}.json"))).map_err(io_error)?;
+
+        let session_path = self.sessions_dir().join(format!("{id}.json"));
+        if let Err(error) = fs::remove_file(&session_path) {
+            if let Some((path, staged)) = &staged_audio {
+                fs::rename(staged, path).map_err(|rollback| {
+                    AppError::new(
+                        "storage_error",
+                        format!("{error}; audio rollback failed: {rollback}"),
+                    )
+                })?;
+            }
+            return Err(io_error(error));
+        }
+
+        if let Some((path, staged)) = staged_audio {
+            if let Err(error) = fs::remove_file(&staged) {
+                fs::rename(&staged, &path).map_err(|rollback| {
+                    AppError::new(
+                        "storage_error",
+                        format!("{error}; audio rollback failed: {rollback}"),
+                    )
+                })?;
+                self.save(&session)?;
+                return Err(io_error(error));
+            }
+        }
         Ok(())
     }
 
@@ -77,12 +115,30 @@ impl SessionStore {
         self.root.join("sessions")
     }
 
-    fn owned_audio_path(&self, audio_path: &str) -> Option<PathBuf> {
-        let audio_directory = self.root.join("audio").canonicalize().ok()?;
-        let audio_path = PathBuf::from(audio_path).canonicalize().ok()?;
-        audio_path
-            .starts_with(audio_directory)
-            .then_some(audio_path)
+    fn validate_audio_path(&self, id: &str, audio_path: &str) -> AppResult<PathBuf> {
+        let audio_directory = self.root.join("audio");
+        let expected = audio_directory.join(format!("{id}.m4a"));
+        let audio_path = PathBuf::from(audio_path);
+        if audio_path != expected {
+            return Err(invalid_audio_path());
+        }
+
+        let root = self.root.canonicalize().map_err(|_| invalid_audio_path())?;
+        let directory = audio_directory
+            .canonicalize()
+            .map_err(|_| invalid_audio_path())?;
+        if directory != root.join("audio") {
+            return Err(invalid_audio_path());
+        }
+        if audio_path.exists()
+            && audio_path
+                .canonicalize()
+                .map_err(|_| invalid_audio_path())?
+                != directory.join(format!("{id}.m4a"))
+        {
+            return Err(invalid_audio_path());
+        }
+        Ok(audio_path)
     }
 
     fn read_session(&self, path: PathBuf) -> AppResult<Session> {
@@ -109,6 +165,10 @@ fn io_error(error: std::io::Error) -> AppError {
 
 fn json_error(error: serde_json::Error) -> AppError {
     AppError::new("serialization_error", error.to_string())
+}
+
+fn invalid_audio_path() -> AppError {
+    AppError::new("invalid_audio_path", "Recorded audio path is invalid")
 }
 
 fn parse_started_at(started_at: &str) -> AppResult<DateTime<FixedOffset>> {

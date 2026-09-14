@@ -77,13 +77,15 @@ fn delete_does_not_remove_audio_outside_the_store() {
         attendees: Vec::new(),
     });
     session.audio_path = Some(outside_audio.to_string_lossy().into_owned());
-    store.save(&session).unwrap();
+    let error = store.save(&session).unwrap_err();
 
-    store.delete(&session.id).unwrap();
-
+    assert_eq!(error.code, "invalid_audio_path");
     assert!(outside_audio.exists());
+    assert!(!root
+        .join("sessions")
+        .join(format!("{}.json", session.id))
+        .exists());
     std::fs::remove_file(outside_audio).unwrap();
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -91,14 +93,14 @@ fn delete_removes_session_and_its_contained_audio() {
     let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
     let audio_dir = root.join("audio");
     std::fs::create_dir_all(&audio_dir).unwrap();
-    let audio_path = audio_dir.join("meeting.m4a");
-    std::fs::write(&audio_path, "meeting audio").unwrap();
     let store = SessionStore::new(root.clone());
     let mut session = Session::new(CreateSessionInput {
         title: "Meeting".into(),
         context: String::new(),
         attendees: Vec::new(),
     });
+    let audio_path = audio_dir.join(format!("{}.m4a", session.id));
+    std::fs::write(&audio_path, "meeting audio").unwrap();
     session.audio_path = Some(audio_path.to_string_lossy().into_owned());
     store.save(&session).unwrap();
     let session_path = root.join("sessions").join(format!("{}.json", session.id));
@@ -119,4 +121,96 @@ fn delete_rejects_traversal_before_constructing_a_path() {
 
     assert_eq!(error.code, "invalid_session_id");
     assert!(!root.exists());
+}
+
+#[test]
+fn save_rejects_audio_that_belongs_to_another_session() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let audio_dir = root.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let wrong_audio = audio_dir.join("another-session.m4a");
+    std::fs::write(&wrong_audio, "audio").unwrap();
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    session.audio_path = Some(wrong_audio.to_string_lossy().into_owned());
+
+    let error = store.save(&session).unwrap_err();
+
+    assert_eq!(error.code, "invalid_audio_path");
+    assert!(!root
+        .join("sessions")
+        .join(format!("{}.json", session.id))
+        .exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_restores_audio_when_session_removal_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let audio_dir = root.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    let audio_path = audio_dir.join(format!("{}.m4a", session.id));
+    std::fs::write(&audio_path, "retryable audio").unwrap();
+    session.audio_path = Some(audio_path.to_string_lossy().into_owned());
+    store.save(&session).unwrap();
+    let sessions_dir = root.join("sessions");
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let error = store.delete(&session.id).unwrap_err();
+
+    assert_eq!(error.code, "storage_error");
+    assert!(audio_path.exists());
+    assert!(store.get(&session.id).is_ok());
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_rejects_an_audio_directory_symlinked_outside_app_data() {
+    use std::os::unix::fs::symlink;
+
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let outside =
+        std::env::temp_dir().join(format!("meeting-notes-audio-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("sessions")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, root.join("audio")).unwrap();
+    let mut session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    let escaped_audio = outside.join(format!("{}.m4a", session.id));
+    std::fs::write(&escaped_audio, "outside audio").unwrap();
+    session.audio_path = Some(
+        root.join("audio")
+            .join(format!("{}.m4a", session.id))
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let session_path = root.join("sessions").join(format!("{}.json", session.id));
+    std::fs::write(&session_path, serde_json::to_vec_pretty(&session).unwrap()).unwrap();
+    let store = SessionStore::new(root.clone());
+
+    let error = store.delete(&session.id).unwrap_err();
+
+    assert_eq!(error.code, "invalid_audio_path");
+    assert!(session_path.exists());
+    assert!(escaped_audio.exists());
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
 }

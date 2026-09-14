@@ -157,8 +157,14 @@ pub fn setup(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
 pub fn stop_recording_on_exit(app: &AppHandle) -> AppResult<()> {
     let state = app.state::<AppState>();
     let _guard = lock_sessions(&state)?;
-    let Some(session) = state
-        .store
+    stop_recording_in_store_on_exit(&state.store, |id| state.recorder.stop(id))
+}
+
+pub fn stop_recording_in_store_on_exit<F>(store: &SessionStore, stop: F) -> AppResult<()>
+where
+    F: FnOnce(&str) -> AppResult<PathBuf>,
+{
+    let Some(session) = store
         .list()?
         .into_iter()
         .find(|session| session.status == SessionStatus::Recording)
@@ -166,15 +172,15 @@ pub fn stop_recording_on_exit(app: &AppHandle) -> AppResult<()> {
         return Ok(());
     };
 
-    let stopped = match state.recorder.stop(&session.id) {
+    let stopped = match stop(&session.id) {
         Ok(path) => interrupted_recording(session, path.to_string_lossy().into_owned())?,
         Err(stop_error) => {
             let failed = recover_interrupted(session);
-            state.store.save(&failed)?;
+            store.save(&failed)?;
             return Err(stop_error);
         }
     };
-    state.store.save(&stopped)
+    store.save(&stopped)
 }
 
 fn spawn_processing(app: AppHandle, id: String) {
@@ -362,9 +368,12 @@ fn lock_sessions(state: &AppState) -> AppResult<MutexGuard<'_, ()>> {
         .map_err(|_| AppError::new("storage_error", "Session storage is unavailable"))
 }
 
-fn recover_interrupted_sessions(store: &SessionStore) -> AppResult<()> {
+pub fn recover_interrupted_sessions(store: &SessionStore) -> AppResult<()> {
     for session in store.list()? {
-        if session.status == SessionStatus::Recording {
+        if matches!(
+            session.status,
+            SessionStatus::Recording | SessionStatus::Processing
+        ) {
             store.save(&recover_interrupted(session))?;
         }
     }
@@ -372,11 +381,13 @@ fn recover_interrupted_sessions(store: &SessionStore) -> AppResult<()> {
 }
 
 pub fn recover_interrupted(mut session: Session) -> Session {
+    let message = if session.status == SessionStatus::Processing {
+        "Processing was interrupted"
+    } else {
+        "Recording was interrupted"
+    };
     session.ended_at.get_or_insert_with(now);
-    transition_to_failed(
-        session,
-        AppError::new("interrupted", "Recording was interrupted"),
-    )
+    transition_to_failed(session, AppError::new("interrupted", message))
 }
 
 pub fn interrupted_recording(

@@ -1,11 +1,12 @@
 use meeting_notes_lib::commands::{
-    interrupted_recording, needs_transcription, recover_interrupted, retry_start,
-    transcript_deleted,
+    interrupted_recording, needs_transcription, recover_interrupted, recover_interrupted_sessions,
+    retry_start, stop_recording_in_store_on_exit, transcript_deleted,
 };
 use meeting_notes_lib::domain::{
     transition_to_failed, transition_to_processing, AppError, CreateSessionInput, Session,
     SessionStatus,
 };
+use meeting_notes_lib::store::SessionStore;
 
 fn session(status: SessionStatus) -> Session {
     let mut session = Session::new(CreateSessionInput {
@@ -90,4 +91,78 @@ fn normal_exit_marks_recording_failed_with_returned_audio() {
     assert_eq!(interrupted.audio_path.as_deref(), Some("/tmp/flushed.m4a"));
     assert_eq!(interrupted.error.unwrap().code, "interrupted");
     assert!(interrupted.ended_at.is_some());
+}
+
+#[test]
+fn stale_processing_before_transcription_keeps_retryable_audio() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let mut processing = processing_session();
+    let audio_dir = root.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let audio_path = audio_dir.join(format!("{}.m4a", processing.id));
+    std::fs::write(&audio_path, "audio").unwrap();
+    processing.audio_path = Some(audio_path.to_string_lossy().into_owned());
+    let id = processing.id.clone();
+    store.save(&processing).unwrap();
+
+    recover_interrupted_sessions(&store).unwrap();
+
+    let recovered = store.get(&id).unwrap();
+    assert_eq!(recovered.status, SessionStatus::Failed);
+    assert_eq!(recovered.error.unwrap().code, "interrupted");
+    assert_eq!(
+        recovered.audio_path.as_deref(),
+        processing.audio_path.as_deref()
+    );
+    assert!(recovered.transcript.is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_processing_before_enrichment_keeps_existing_transcript() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let mut processing = processing_session();
+    processing.transcript = Some("spoken transcript".into());
+    processing.audio_path = None;
+    let id = processing.id.clone();
+    store.save(&processing).unwrap();
+
+    recover_interrupted_sessions(&store).unwrap();
+
+    let recovered = store.get(&id).unwrap();
+    assert_eq!(recovered.status, SessionStatus::Failed);
+    assert_eq!(recovered.error.unwrap().code, "interrupted");
+    assert_eq!(recovered.transcript.as_deref(), Some("spoken transcript"));
+    assert!(recovered.audio_path.is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exit_cleanup_is_idempotent_after_flushing_the_active_recorder() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let mut recording = recording_session();
+    let audio_dir = root.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let audio_path = audio_dir.join(format!("{}.m4a", recording.id));
+    std::fs::write(&audio_path, "audio").unwrap();
+    recording.audio_path = Some(audio_path.to_string_lossy().into_owned());
+    let id = recording.id.clone();
+    store.save(&recording).unwrap();
+    let mut stops = 0;
+
+    stop_recording_in_store_on_exit(&store, |_| {
+        stops += 1;
+        Ok(audio_path.clone())
+    })
+    .unwrap();
+    stop_recording_in_store_on_exit(&store, |_| panic!("recorder stopped twice")).unwrap();
+
+    assert_eq!(stops, 1);
+    let saved = store.get(&id).unwrap();
+    assert_eq!(saved.status, SessionStatus::Failed);
+    assert_eq!(saved.audio_path.as_deref(), recording.audio_path.as_deref());
+    std::fs::remove_dir_all(root).unwrap();
 }

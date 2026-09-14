@@ -7,9 +7,11 @@ pub mod store;
 
 pub const APP_NAME: &str = "Meeting Notes";
 pub const BUNDLE_ID: &str = "com.dweng.meetingnotes";
+#[cfg(target_os = "macos")]
+const SAFE_QUIT_MENU_ID: &str = "quit-after-save";
 
 pub fn build_app() -> tauri::Builder<tauri::Wry> {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .setup(commands::setup)
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
@@ -22,7 +24,56 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::delete_transcript,
             commands::save_api_key,
             commands::has_api_key,
-        ])
+        ]);
+
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(safe_macos_menu).on_menu_event(|app, event| {
+        use tauri::Manager;
+
+        if event.id() == SAFE_QUIT_MENU_ID {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.close();
+            } else {
+                app.exit(0);
+            }
+        }
+    });
+
+    builder
+}
+
+#[cfg(target_os = "macos")]
+fn safe_macos_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem};
+
+    let menu = Menu::default(app)?;
+    let app_menu = menu
+        .items()?
+        .into_iter()
+        .next()
+        .and_then(|item| item.as_submenu().cloned())
+        .ok_or_else(|| std::io::Error::other("macOS application menu is unavailable"))?;
+    let quit_position = app_menu
+        .items()?
+        .iter()
+        .position(|item| {
+            item.as_predefined_menuitem()
+                .and_then(|item| item.text().ok())
+                .is_some_and(|text| text.starts_with("Quit "))
+        })
+        .ok_or_else(|| std::io::Error::other("macOS Quit menu item is unavailable"))?;
+    app_menu.remove_at(quit_position)?;
+    app_menu.insert(
+        &MenuItem::with_id(
+            app,
+            SAFE_QUIT_MENU_ID,
+            format!("Quit {}", app.package_info().name),
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?,
+        quit_position,
+    )?;
+    Ok(menu)
 }
 
 #[cfg(test)]

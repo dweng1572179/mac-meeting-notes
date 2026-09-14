@@ -5,7 +5,10 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building Meeting Notes");
     app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
             if let Err(error) = meeting_notes_lib::commands::stop_recording_on_exit(app) {
                 eprintln!("Could not preserve the active recording: {}", error.message);
             }

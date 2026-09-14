@@ -199,6 +199,24 @@ export function onWindowCloseRequested(handler: () => Promise<void>): UnlistenFn
   );
 }
 
+export function createCloseHandler(
+  flush: () => Promise<void>,
+  destroy: () => Promise<void>
+): () => Promise<void> {
+  let closing = false;
+  return async () => {
+    if (closing) return;
+    closing = true;
+    try {
+      await flush();
+      await destroy();
+    } catch (error) {
+      closing = false;
+      throw error;
+    }
+  };
+}
+
 export async function destroyCurrentWindow(): Promise<void> {
   if (isNative()) await getCurrentWindow().destroy();
 }
