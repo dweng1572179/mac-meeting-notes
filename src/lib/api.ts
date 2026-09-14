@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import type {
   Bootstrap,
   CreateSessionInput,
@@ -8,7 +9,7 @@ import type {
   UpdateSessionInput
 } from './types';
 
-const previewSession: Session = {
+const basePreviewSession: Session = {
   id: 'simulation-riverside-logistics',
   title: '[SIMULATION] Riverside Logistics Center',
   startedAt: '2026-09-12T17:30:00.000Z',
@@ -26,12 +27,42 @@ const previewSession: Session = {
 };
 
 const isNative = () => '__TAURI_INTERNALS__' in window;
+let previewSession: Session | undefined;
+
+function previewState(): Session {
+  const status = new URLSearchParams(window.location.search).get('state');
+  const selectedStatus = ['draft', 'recording', 'processing', 'complete', 'failed'].includes(status ?? '')
+    ? (status as Session['status'])
+    : 'complete';
+
+  return {
+    ...basePreviewSession,
+    endedAt: ['processing', 'complete', 'failed'].includes(selectedStatus)
+      ? basePreviewSession.endedAt
+      : null,
+    transcript: ['complete', 'failed'].includes(selectedStatus)
+      ? '[SIMULATION] The team agreed to continue underwriting and request the latest property documents.'
+      : null,
+    enrichedNotes: selectedStatus === 'complete' ? basePreviewSession.enrichedNotes : null,
+    status: selectedStatus,
+    error:
+      selectedStatus === 'failed'
+        ? { code: 'openai_request', message: '[SIMULATION] Processing could not reach OpenAI.' }
+        : null,
+    audioPath: ['recording', 'processing', 'failed'].includes(selectedStatus)
+      ? '/tmp/simulation-riverside-logistics.m4a'
+      : null
+  };
+}
+
+const previewDelay = () => new Promise((resolve) => setTimeout(resolve, 350));
 
 export async function bootstrap(): Promise<Bootstrap> {
   if (!isNative()) {
+    previewSession = previewState();
     return {
       sessions: new URLSearchParams(window.location.search).has('empty') ? [] : [previewSession],
-      hasApiKey: false
+      hasApiKey: new URLSearchParams(window.location.search).has('key')
     };
   }
   return invoke<Bootstrap>('bootstrap');
@@ -39,8 +70,8 @@ export async function bootstrap(): Promise<Bootstrap> {
 
 export async function createSession(input: CreateSessionInput): Promise<Session> {
   if (!isNative()) {
-    return {
-      ...previewSession,
+    previewSession = {
+      ...(previewSession ?? previewState()),
       id: 'simulation-new-note',
       title: input.title || 'Untitled meeting',
       startedAt: '2026-09-13T16:00:00.000Z',
@@ -51,27 +82,55 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
       enrichedNotes: null,
       status: 'draft'
     };
+    return previewSession;
   }
   return invoke<Session>('create_session', { input });
 }
 
 export async function saveSession(input: UpdateSessionInput): Promise<Session> {
-  if (!isNative()) return { ...previewSession, ...input };
+  if (!isNative()) {
+    previewSession = { ...(previewSession ?? previewState()), ...input };
+    return previewSession;
+  }
   return invoke<Session>('save_session', { input });
 }
 
 export async function startRecording(id: string): Promise<RecordingInfo> {
-  if (!isNative()) return { sessionId: id, startedAt: '2026-09-13T16:00:00.000Z' };
+  if (!isNative()) {
+    await previewDelay();
+    if (new URLSearchParams(window.location.search).get('captureError') === 'permission') {
+      throw {
+        code: 'audio_capture',
+        message: '[SIMULATION] System audio capture was denied with OSStatus -66748.'
+      };
+    }
+    previewSession = { ...(previewSession ?? previewState()), id, status: 'recording', error: null };
+    return { sessionId: id, startedAt: new Date().toISOString() };
+  }
   return invoke<RecordingInfo>('start_recording', { id });
 }
 
 export async function stopRecording(id: string): Promise<Session> {
-  if (!isNative()) return { ...previewSession, id, status: 'processing' };
+  if (!isNative()) {
+    await previewDelay();
+    previewSession = {
+      ...(previewSession ?? previewState()),
+      id,
+      endedAt: new Date().toISOString(),
+      status: 'processing',
+      error: null
+    };
+    return previewSession;
+  }
   return invoke<Session>('stop_recording', { id });
 }
 
 export async function retryProcessing(id: string): Promise<Session> {
-  if (!isNative()) return { ...previewSession, id, status: 'processing', error: null };
+  if (!isNative()) {
+    await previewDelay();
+    previewSession = { ...(previewSession ?? previewState()), id, status: 'processing', error: null };
+    return previewSession;
+  }
   return invoke<Session>('retry_processing', { id });
 }
 
@@ -110,4 +169,18 @@ export function disposeAsyncListener(registration: Promise<UnlistenFn>): Unliste
 export function onSessionUpdated(handler: (session: Session) => void): UnlistenFn {
   if (!isNative()) return () => {};
   return disposeAsyncListener(listen<Session>('session-updated', ({ payload }) => handler(payload)));
+}
+
+export function onWindowCloseRequested(handler: () => Promise<void>): UnlistenFn {
+  if (!isNative()) return () => {};
+  return disposeAsyncListener(
+    getCurrentWindow().onCloseRequested(async (event) => {
+      event.preventDefault();
+      await handler();
+    })
+  );
+}
+
+export async function destroyCurrentWindow(): Promise<void> {
+  if (isNative()) await getCurrentWindow().destroy();
 }

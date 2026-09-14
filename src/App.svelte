@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { bootstrap, createSession, onSessionUpdated } from './lib/api';
+  import MeetingEditor from './lib/MeetingEditor.svelte';
   import SettingsDialog from './lib/SettingsDialog.svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import type { Session } from './lib/types';
@@ -12,6 +13,7 @@
   let loading = $state(true);
   let creating = $state(false);
   let error = $state('');
+  let editor = $state<{ flush: () => Promise<void> } | undefined>();
   let selected = $derived(sessions.find((session) => session.id === selectedId) ?? null);
 
   onMount(() => {
@@ -26,11 +28,7 @@
       })
       .finally(() => (loading = false));
 
-    const unlisten = onSessionUpdated((updated) => {
-      sessions = sessions.some(({ id }) => id === updated.id)
-        ? sessions.map((session) => (session.id === updated.id ? updated : session))
-        : [updated, ...sessions];
-    });
+    const unlisten = onSessionUpdated(updateSession);
 
     return () => unlisten();
   });
@@ -39,6 +37,7 @@
     creating = true;
     error = '';
     try {
+      await editor?.flush();
       const session = await createSession({ title: 'Untitled meeting', context: '', attendees: [] });
       sessions = [session, ...sessions];
       selectedId = session.id;
@@ -49,10 +48,22 @@
     }
   }
 
-  const meetingDate = (startedAt: string) =>
-    new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(
-      new Date(startedAt)
-    );
+  function updateSession(updated: Session) {
+    sessions = sessions.some(({ id }) => id === updated.id)
+      ? sessions.map((session) => (session.id === updated.id ? updated : session))
+      : [updated, ...sessions];
+  }
+
+  async function selectSession(id: string | null) {
+    if (id === selectedId) return;
+    error = '';
+    try {
+      await editor?.flush();
+      selectedId = id;
+    } catch {
+      error = 'Save this note before switching meetings.';
+    }
+  }
 </script>
 
 <div class="app-shell">
@@ -60,9 +71,9 @@
     {sessions}
     {selectedId}
     {creating}
-    onHome={() => (selectedId = null)}
+    onHome={() => selectSession(null)}
     onNewNote={newNote}
-    onSelect={(id) => (selectedId = id)}
+    onSelect={selectSession}
     onSettings={() => (settingsOpen = true)}
   />
 
@@ -74,41 +85,15 @@
     {#if loading}
       <p class="loading-copy">Opening your meeting library…</p>
     {:else if selected}
-      <article class="meeting-document" aria-labelledby="meeting-title">
-        <header class="document-header">
-          <p class="meeting-date">{meetingDate(selected.startedAt)}</p>
-          <h1 id="meeting-title">{selected.title}</h1>
-          <div class="meeting-meta">
-            <span class:failed={selected.status === 'failed'}>{selected.status}</span>
-            {#if selected.attendees.length}
-              <span>{selected.attendees.join(', ')}</span>
-            {/if}
-          </div>
-          {#if selected.context}
-            <p class="meeting-context">{selected.context}</p>
-          {/if}
-        </header>
-
-        <section class="notes-section" aria-labelledby="notes-title">
-          <h2 id="notes-title">Notes</h2>
-          {#if selected.originalNotes}
-            <div class="note-copy">{selected.originalNotes}</div>
-          {:else}
-            <p class="document-empty">Start with the questions, numbers, and decisions you want to remember.</p>
-          {/if}
-        </section>
-
-        {#if selected.enrichedNotes}
-          <section class="notes-section" aria-labelledby="summary-title">
-            <h2 id="summary-title">Summary</h2>
-            <div class="note-copy enriched">{selected.enrichedNotes}</div>
-          </section>
-        {/if}
-
-        {#if selected.error}
-          <p class="processing-error" role="alert">{selected.error.message} Open the note and retry processing.</p>
-        {/if}
-      </article>
+      {#key selected.id}
+        <MeetingEditor
+          bind:this={editor}
+          session={selected}
+          {hasApiKey}
+          onSessionChange={updateSession}
+          onOpenSettings={() => (settingsOpen = true)}
+        />
+      {/key}
     {:else}
       <section class="library-empty" aria-labelledby="empty-title">
         <p>{sessions.length ? 'Meeting library' : 'Your meeting library'}</p>
