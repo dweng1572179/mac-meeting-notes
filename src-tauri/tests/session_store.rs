@@ -85,3 +85,38 @@ fn delete_does_not_remove_audio_outside_the_store() {
     std::fs::remove_file(outside_audio).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn delete_removes_session_and_its_contained_audio() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let audio_dir = root.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let audio_path = audio_dir.join("meeting.m4a");
+    std::fs::write(&audio_path, "meeting audio").unwrap();
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    session.audio_path = Some(audio_path.to_string_lossy().into_owned());
+    store.save(&session).unwrap();
+    let session_path = root.join("sessions").join(format!("{}.json", session.id));
+
+    store.delete(&session.id).unwrap();
+
+    assert!(!session_path.exists());
+    assert!(!audio_path.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn delete_rejects_traversal_before_constructing_a_path() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+
+    let error = store.delete("../outside").unwrap_err();
+
+    assert_eq!(error.code, "invalid_session_id");
+    assert!(!root.exists());
+}

@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { bootstrap, createSession, onSessionUpdated } from './lib/api';
+  import {
+    bootstrap,
+    createSession,
+    deleteSession,
+    deleteTranscript,
+    onSessionUpdated
+  } from './lib/api';
   import MeetingEditor from './lib/MeetingEditor.svelte';
   import SettingsDialog from './lib/SettingsDialog.svelte';
   import Sidebar from './lib/Sidebar.svelte';
@@ -76,6 +82,25 @@
       error = 'Save this note before switching meetings.';
     }
   }
+
+  async function removeTranscript(id: string) {
+    if (id === selectedId) await editor?.flush();
+    updateSession(await deleteTranscript(id));
+  }
+
+  async function removeMeeting(id: string) {
+    if (id === selectedId) await editor?.flush();
+    await deleteSession(id);
+    const removedIndex = sessions.findIndex((session) => session.id === id);
+    const nextSelectedId =
+      id === selectedId
+        ? (sessions[removedIndex + 1]?.id ?? sessions[removedIndex - 1]?.id ?? null)
+        : selectedId;
+    sessions = sessions.filter((session) => session.id !== id);
+    selectedId = nextSelectedId;
+    const { [id]: _removed, ...active } = recordingBaselines;
+    recordingBaselines = active;
+  }
 </script>
 
 <div class="app-shell">
@@ -106,6 +131,8 @@
           onRecordingStarted={rememberRecordingStart}
           onSessionChange={updateSession}
           onOpenSettings={() => (settingsOpen = true)}
+          onDeleteTranscript={removeTranscript}
+          onDeleteMeeting={removeMeeting}
         />
       {/key}
     {:else}

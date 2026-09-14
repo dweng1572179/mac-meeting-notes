@@ -126,6 +126,11 @@ pub fn delete_session(state: State<'_, AppState>, id: String) -> AppResult<()> {
 }
 
 #[tauri::command]
+pub fn delete_transcript(state: State<'_, AppState>, id: String) -> AppResult<Session> {
+    delete_transcript_state(&state, &id)
+}
+
+#[tauri::command]
 pub async fn save_api_key(state: State<'_, AppState>, key: String) -> AppResult<()> {
     let key = key.trim();
     if key.is_empty() {
@@ -144,9 +149,32 @@ pub fn setup(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     let root = app.path().app_data_dir()?;
     fs::create_dir_all(&root)?;
     let store = SessionStore::new(root);
-    recover_interrupted(&store).map_err(boxed_app_error)?;
+    recover_interrupted_sessions(&store).map_err(boxed_app_error)?;
     app.manage(AppState::new(store));
     Ok(())
+}
+
+pub fn stop_recording_on_exit(app: &AppHandle) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    let _guard = lock_sessions(&state)?;
+    let Some(session) = state
+        .store
+        .list()?
+        .into_iter()
+        .find(|session| session.status == SessionStatus::Recording)
+    else {
+        return Ok(());
+    };
+
+    let stopped = match state.recorder.stop(&session.id) {
+        Ok(path) => interrupted_recording(session, path.to_string_lossy().into_owned())?,
+        Err(stop_error) => {
+            let failed = recover_interrupted(session);
+            state.store.save(&failed)?;
+            return Err(stop_error);
+        }
+    };
+    state.store.save(&stopped)
 }
 
 fn spawn_processing(app: AppHandle, id: String) {
@@ -163,7 +191,7 @@ async fn process_session(app: &AppHandle, id: &str) -> AppResult<()> {
     let api_key = ApiKeyStore::load()?
         .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
 
-    if session.transcript.is_none() {
+    if needs_transcription(&session) {
         let path = retained_audio_path(app, &session)?
             .ok_or_else(|| AppError::new("audio_file", "Recorded audio is unavailable"))?;
         let transcript = state.openai.transcribe(&path, &api_key).await?;
@@ -231,15 +259,23 @@ fn failed_after_stop_save(mut session: Session, audio_path: String, error: AppEr
 
 fn prepare_retry(state: &AppState, id: &str) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
-    let mut session = state.store.get(id)?;
+    let session = retry_start(state.store.get(id)?)?;
+    state.store.save(&session)?;
+    Ok(session)
+}
+
+pub fn retry_start(mut session: Session) -> AppResult<Session> {
     if session.status != SessionStatus::Failed {
         return Err(invalid_status("Only a failed session can be retried"));
     }
     session.status = SessionStatus::Processing;
     session.error = None;
     session.ended_at.get_or_insert_with(now);
-    state.store.save(&session)?;
     Ok(session)
+}
+
+pub fn needs_transcription(session: &Session) -> bool {
+    session.transcript.is_none()
 }
 
 fn delete_session_state(state: &AppState, id: &str) -> AppResult<()> {
@@ -254,6 +290,29 @@ fn delete_session_state(state: &AppState, id: &str) -> AppResult<()> {
         ));
     }
     state.store.delete(id)
+}
+
+fn delete_transcript_state(state: &AppState, id: &str) -> AppResult<Session> {
+    let _guard = lock_sessions(state)?;
+    let session = transcript_deleted(state.store.get(id)?)?;
+    state.store.save(&session)?;
+    Ok(session)
+}
+
+pub fn transcript_deleted(mut session: Session) -> AppResult<Session> {
+    if matches!(
+        session.status,
+        SessionStatus::Recording | SessionStatus::Processing
+    ) {
+        return Err(invalid_status(
+            "Stop recording or processing before deleting the transcript",
+        ));
+    }
+    session.transcript = None;
+    session.enriched_notes = None;
+    session.status = SessionStatus::Draft;
+    session.error = None;
+    Ok(session)
 }
 
 fn persist_transcript(state: &AppState, id: &str, transcript: String) -> AppResult<Session> {
@@ -303,16 +362,28 @@ fn lock_sessions(state: &AppState) -> AppResult<MutexGuard<'_, ()>> {
         .map_err(|_| AppError::new("storage_error", "Session storage is unavailable"))
 }
 
-fn recover_interrupted(store: &SessionStore) -> AppResult<()> {
+fn recover_interrupted_sessions(store: &SessionStore) -> AppResult<()> {
     for session in store.list()? {
         if session.status == SessionStatus::Recording {
-            store.save(&transition_to_failed(
-                session,
-                AppError::new("interrupted", "Recording was interrupted"),
-            ))?;
+            store.save(&recover_interrupted(session))?;
         }
     }
     Ok(())
+}
+
+pub fn recover_interrupted(mut session: Session) -> Session {
+    session.ended_at.get_or_insert_with(now);
+    transition_to_failed(
+        session,
+        AppError::new("interrupted", "Recording was interrupted"),
+    )
+}
+
+pub fn interrupted_recording(
+    session: Session,
+    audio_path: impl Into<String>,
+) -> AppResult<Session> {
+    transition_to_processing(session, audio_path).map(recover_interrupted)
 }
 
 fn audio_path(app: &AppHandle, id: &str) -> AppResult<PathBuf> {

@@ -33,7 +33,9 @@
     recordingStartedAt,
     onRecordingStarted,
     onSessionChange,
-    onOpenSettings
+    onOpenSettings,
+    onDeleteTranscript,
+    onDeleteMeeting
   }: {
     session: Session;
     hasApiKey: boolean;
@@ -41,6 +43,8 @@
     onRecordingStarted: (id: string, baseline: number) => void;
     onSessionChange: (session: Session) => void;
     onOpenSettings: () => void;
+    onDeleteTranscript: (id: string) => Promise<void>;
+    onDeleteMeeting: (id: string) => Promise<void>;
   } = $props();
 
   const initial = <T,>(read: () => T) => read();
@@ -54,6 +58,11 @@
   let saveStatus = $state('');
   let lastStatus = initial(() => session.status);
   let originalUsedWhileProcessing = false;
+  let confirmation = $state<'transcript' | 'meeting' | null>(null);
+  let deleting = $state(false);
+  let deleteError = $state('');
+  let actionMenu: HTMLDivElement;
+  let confirmationDialog: HTMLDialogElement;
 
   const autosave = createAutosave<UpdateSessionInput>(450, async (input) => {
     saveStatus = 'Saving…';
@@ -142,6 +151,29 @@
     await autosave.flush();
   }
 
+  function requestDeletion(target: 'transcript' | 'meeting') {
+    actionMenu.hidePopover();
+    confirmation = target;
+    deleteError = '';
+    confirmationDialog.showModal();
+  }
+
+  async function confirmDeletion() {
+    if (!confirmation) return;
+    deleting = true;
+    deleteError = '';
+    try {
+      await flush();
+      if (confirmation === 'transcript') await onDeleteTranscript(session.id);
+      else await onDeleteMeeting(session.id);
+      confirmationDialog.close();
+    } catch (error) {
+      deleteError = errorMessage(error, 'This meeting could not be changed. Try again.');
+    } finally {
+      deleting = false;
+    }
+  }
+
   const meetingDate = (startedAt: string) =>
     new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(
       new Date(startedAt)
@@ -151,7 +183,29 @@
 <article class="meeting-document" aria-labelledby="meeting-heading">
   <header class="document-header">
     <h1 class="sr-only" id="meeting-heading">{title || 'Untitled meeting'}</h1>
-    <time class="meeting-date" datetime={session.startedAt}>{meetingDate(session.startedAt)}</time>
+    <div class="document-toolbar">
+      <time class="meeting-date" datetime={session.startedAt}>{meetingDate(session.startedAt)}</time>
+      <button
+        class="meeting-menu-trigger"
+        type="button"
+        aria-label={`Actions for ${title || 'Untitled meeting'}`}
+        popovertarget="meeting-actions"
+      >•••</button>
+    </div>
+    <div bind:this={actionMenu} class="meeting-actions" id="meeting-actions" popover="auto" role="menu">
+      <button
+        type="button"
+        role="menuitem"
+        disabled={session.transcript === null || session.status === 'recording' || session.status === 'processing'}
+        onclick={() => requestDeletion('transcript')}
+      >Delete transcript</button>
+      <button
+        type="button"
+        role="menuitem"
+        disabled={session.status === 'recording' || session.status === 'processing'}
+        onclick={() => requestDeletion('meeting')}
+      >Delete meeting</button>
+    </div>
     <label class="sr-only" id="meeting-title-label" for="meeting-title">Title</label>
     <textarea
       class="meeting-title-input"
@@ -244,3 +298,118 @@
     {onOpenSettings}
   />
 </article>
+
+<dialog
+  bind:this={confirmationDialog}
+  class="settings-dialog deletion-dialog"
+  aria-labelledby="deletion-title"
+  oncancel={(event) => { if (deleting) event.preventDefault(); }}
+  onclose={() => { confirmation = null; deleteError = ''; }}
+>
+  {#if confirmation}
+    <h2 id="deletion-title">
+      Delete {confirmation === 'transcript' ? 'transcript' : 'meeting'} for “{title || 'Untitled meeting'}”?
+    </h2>
+    <p class="settings-copy">
+      {#if confirmation === 'transcript'}
+        The transcript and enhanced notes will be permanently removed. Your original notes and any retained audio will stay.
+      {:else if session.audioPath !== null}
+        This meeting, its notes, and its retained audio recording will be permanently removed.
+      {:else}
+        This meeting and its notes will be permanently removed. There is no retained audio recording to remove.
+      {/if}
+    </p>
+    {#if deleteError}<p class="deletion-error" role="alert">{deleteError}</p>{/if}
+    <div class="deletion-footer">
+      <button type="button" disabled={deleting} onclick={() => confirmationDialog.close()}>Cancel</button>
+      <button class="delete-button" type="button" disabled={deleting} onclick={confirmDeletion}>
+        {deleting ? 'Deleting…' : `Delete ${confirmation}`}
+      </button>
+    </div>
+  {/if}
+</dialog>
+
+<style>
+  .document-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .meeting-menu-trigger {
+    min-width: 34px;
+    min-height: 30px;
+    padding: 0 8px 5px;
+    border: 0;
+    border-radius: 7px;
+    color: var(--muted-text);
+    background: transparent;
+    font-size: 17px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .meeting-menu-trigger:hover { background: var(--sidebar); }
+
+  .meeting-actions {
+    width: 180px;
+    padding: 5px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    color: var(--ink);
+    background: var(--paper);
+    box-shadow: 0 12px 34px rgba(41, 41, 33, 0.18);
+  }
+
+  .meeting-actions::backdrop { background: transparent; }
+
+  .meeting-actions button {
+    display: block;
+    width: 100%;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--danger);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .meeting-actions button:hover { background: var(--sidebar); }
+  .meeting-actions button:disabled { color: var(--muted-text); cursor: not-allowed; opacity: 0.55; }
+
+  .deletion-dialog { width: min(100%, 520px); }
+  .deletion-dialog h2 { line-height: 1.2; }
+
+  .deletion-error {
+    margin: 0 0 18px;
+    color: var(--danger);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .deletion-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+
+  .deletion-footer button {
+    min-height: 38px;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--paper);
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .deletion-footer .delete-button {
+    border-color: var(--danger);
+    color: #fff;
+    background: var(--danger);
+  }
+
+  .deletion-footer button:disabled { cursor: wait; opacity: 0.65; }
+</style>

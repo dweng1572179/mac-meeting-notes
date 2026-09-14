@@ -135,8 +135,26 @@ export async function retryProcessing(id: string): Promise<Session> {
 }
 
 export async function deleteSession(id: string): Promise<void> {
-  if (!isNative()) return;
+  if (!isNative()) {
+    if (previewSession?.id === id) previewSession = undefined;
+    return;
+  }
   return invoke<void>('delete_session', { id });
+}
+
+export async function deleteTranscript(id: string): Promise<Session> {
+  if (!isNative()) {
+    previewSession = {
+      ...(previewSession ?? previewState()),
+      id,
+      transcript: null,
+      enrichedNotes: null,
+      status: 'draft',
+      error: null
+    };
+    return previewSession;
+  }
+  return invoke<Session>('delete_transcript', { id });
 }
 
 export async function saveApiKey(key: string): Promise<void> {

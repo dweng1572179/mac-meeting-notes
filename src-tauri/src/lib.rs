@@ -19,6 +19,7 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::stop_recording,
             commands::retry_processing,
             commands::delete_session,
+            commands::delete_transcript,
             commands::save_api_key,
             commands::has_api_key,
         ])
