@@ -11,6 +11,7 @@ const ENRICHMENT_MODEL: &str = "gpt-6-astra";
 
 pub struct OpenAiClient {
     client: Client,
+    base_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,15 +24,20 @@ pub struct EnrichedSections {
 
 impl OpenAiClient {
     pub fn new() -> Self {
+        Self::with_base_url(API_BASE)
+    }
+
+    pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             client: Client::new(),
+            base_url: base_url.into(),
         }
     }
 
     pub async fn validate_key(&self, api_key: &str) -> AppResult<()> {
         let response = self
             .client
-            .get(format!("{API_BASE}/models/{ENRICHMENT_MODEL}"))
+            .get(format!("{}/models/{ENRICHMENT_MODEL}", self.base_url))
             .bearer_auth(api_key)
             .send()
             .await
@@ -53,7 +59,7 @@ impl OpenAiClient {
             .part("file", multipart::Part::bytes(audio).file_name(filename));
         let response = self
             .client
-            .post(format!("{API_BASE}/audio/transcriptions"))
+            .post(format!("{}/audio/transcriptions", self.base_url))
             .bearer_auth(api_key)
             .multipart(form)
             .send()
@@ -70,7 +76,7 @@ impl OpenAiClient {
     pub async fn enrich(&self, session: &Session, api_key: &str) -> AppResult<EnrichedSections> {
         let response = self
             .client
-            .post(format!("{API_BASE}/responses"))
+            .post(format!("{}/responses", self.base_url))
             .bearer_auth(api_key)
             .json(&build_enrichment_request(session))
             .send()
@@ -81,13 +87,22 @@ impl OpenAiClient {
             .json::<Value>()
             .await
             .map_err(|_| AppError::new("openai", "OpenAI returned an invalid response"))?;
+        if response["status"] != "completed" {
+            return Err(AppError::new("openai", "OpenAI response was not completed"));
+        }
         let text = response["output"]
             .as_array()
             .and_then(|output| {
                 output.iter().find_map(|item| {
                     item["content"]
                         .as_array()
-                        .and_then(|content| content.iter().find_map(|part| part["text"].as_str()))
+                        .and_then(|content| {
+                            content.iter().find_map(|part| {
+                                (part["type"] == "output_text")
+                                    .then(|| part["text"].as_str())
+                                    .flatten()
+                            })
+                        })
                 })
             })
             .ok_or_else(|| AppError::new("openai", "OpenAI returned no enrichment content"))?;
