@@ -284,7 +284,6 @@ fn validate_meeting_answer(
             "OpenAI returned an empty meeting answer",
         ));
     }
-    let had_citations = !raw.citations.is_empty();
     let citations = raw
         .citations
         .into_iter()
@@ -302,7 +301,7 @@ fn validate_meeting_answer(
             })
         })
         .collect::<Vec<_>>();
-    if had_citations && citations.is_empty() {
+    if citations.is_empty() {
         return Err(AppError::new(
             "unverified_answer",
             "OpenAI returned an answer without a verifiable meeting source",

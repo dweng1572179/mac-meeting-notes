@@ -220,6 +220,36 @@ fn folder_question_rejects_an_answer_with_only_invented_citations() {
     assert_eq!(error.code, "unverified_answer");
 }
 
+#[test]
+fn folder_question_rejects_an_uncited_answer() {
+    let response = json_response(
+        200,
+        &json!({
+            "status": "completed",
+            "output": [{
+                "content": [{
+                    "type": "output_text",
+                    "text": serde_json::json!({
+                        "answer": "Unsupported claim.",
+                        "citations": []
+                    }).to_string()
+                }]
+            }]
+        })
+        .to_string(),
+    );
+    let (base_url, _requests) = local_server(response);
+
+    let error = tauri::async_runtime::block_on(OpenAiClient::with_base_url(base_url).ask_meetings(
+        &[session()],
+        "What happened?",
+        "test-key",
+    ))
+    .unwrap_err();
+
+    assert_eq!(error.code, "unverified_answer");
+}
+
 fn session() -> Session {
     let mut session = Session::new(CreateSessionInput {
         title: "[SIMULATION] Harbor Office 73".into(),
