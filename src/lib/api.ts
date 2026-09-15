@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type {
   Bootstrap,
   CreateSessionInput,
+  MeetingAnswer,
   RecordingInfo,
   Session,
   UpdateSessionInput
@@ -16,6 +17,7 @@ const basePreviewSession: Session = {
   endedAt: '2026-09-12T18:14:00.000Z',
   context: '[SIMULATION] Initial acquisition review for a regional distribution property.',
   attendees: ['Alex Morgan', 'Jordan Lee', 'Sam Rivera'],
+  folder: 'Acquisitions',
   originalNotes:
     '[SIMULATION]\n\nConfirm tenant rollover exposure and request the latest roof inspection. Underwrite the south bay at market rent.',
   transcript: null,
@@ -23,7 +25,8 @@ const basePreviewSession: Session = {
     '## Decision\n\nAdvance to a detailed underwriting review.\n\n## Follow-ups\n\n- Request the current rent roll and roof report\n- Revisit the south-bay rent assumption',
   status: 'complete',
   error: null,
-  audioPath: null
+  audioPath: null,
+  microphoneAudioPath: null
 };
 
 const isNative = () => '__TAURI_INTERNALS__' in window;
@@ -51,6 +54,9 @@ function previewState(): Session {
         : null,
     audioPath: ['recording', 'processing', 'failed'].includes(selectedStatus)
       ? '/tmp/simulation-riverside-logistics.m4a'
+      : null,
+    microphoneAudioPath: ['recording', 'processing', 'failed'].includes(selectedStatus)
+      ? '/tmp/simulation-riverside-logistics-mic.m4a'
       : null
   };
 }
@@ -78,6 +84,7 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
       endedAt: null,
       context: input.context,
       attendees: input.attendees,
+      folder: '',
       originalNotes: '',
       enrichedNotes: null,
       status: 'draft'
@@ -165,6 +172,24 @@ export async function saveApiKey(key: string): Promise<void> {
 export async function hasApiKey(): Promise<boolean> {
   if (!isNative()) return false;
   return invoke<boolean>('has_api_key');
+}
+
+export async function askMeetings(folder: string | null, question: string): Promise<MeetingAnswer> {
+  if (!isNative()) {
+    await previewDelay();
+    const source = previewSession ?? previewState();
+    return {
+      answer: '[SIMULATION] The team decided to advance to detailed underwriting while the rent roll and roof report remain open.',
+      citations: [
+        {
+          sessionId: source.id,
+          title: source.title,
+          excerpt: 'Advance to a detailed underwriting review.'
+        }
+      ]
+    };
+  }
+  return invoke<MeetingAnswer>('ask_meetings', { folder, question });
 }
 
 export function disposeAsyncListener(registration: Promise<UnlistenFn>): UnlistenFn {

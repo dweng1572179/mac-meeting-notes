@@ -17,6 +17,7 @@ pub struct UpdateSessionInput {
     pub title: String,
     pub context: String,
     pub attendees: Vec<String>,
+    pub folder: String,
     pub original_notes: String,
 }
 
@@ -29,12 +30,16 @@ pub struct Session {
     pub ended_at: Option<String>,
     pub context: String,
     pub attendees: Vec<String>,
+    #[serde(default)]
+    pub folder: String,
     pub original_notes: String,
     pub transcript: Option<String>,
     pub enriched_notes: Option<String>,
     pub status: SessionStatus,
     pub error: Option<AppError>,
     pub audio_path: Option<String>,
+    #[serde(default)]
+    pub microphone_audio_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -51,6 +56,20 @@ pub enum SessionStatus {
 pub struct AppError {
     pub code: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingCitation {
+    pub session_id: String,
+    pub title: String,
+    pub excerpt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeetingAnswer {
+    pub answer: String,
+    pub citations: Vec<MeetingCitation>,
 }
 
 pub type AppResult<T> = Result<T, AppError>;
@@ -79,12 +98,14 @@ impl Session {
             ended_at: None,
             context: input.context,
             attendees: input.attendees,
+            folder: String::new(),
             original_notes: String::new(),
             transcript: None,
             enriched_notes: None,
             status: SessionStatus::Draft,
             error: None,
             audio_path: None,
+            microphone_audio_path: None,
         }
     }
 
@@ -98,6 +119,7 @@ impl Session {
         self.title = input.title;
         self.context = input.context;
         self.attendees = input.attendees;
+        self.folder = input.folder.trim().to_owned();
         self.original_notes = input.original_notes;
         Ok(())
     }
@@ -106,6 +128,7 @@ impl Session {
 pub fn transition_to_processing(
     mut session: Session,
     audio_path: impl Into<String>,
+    microphone_audio_path: Option<String>,
 ) -> AppResult<Session> {
     if session.status != SessionStatus::Recording {
         return Err(AppError::new(
@@ -115,6 +138,7 @@ pub fn transition_to_processing(
     }
     session.ended_at = Some(Utc::now().to_rfc3339_opts(SecondsFormat::AutoSi, true));
     session.audio_path = Some(audio_path.into());
+    session.microphone_audio_path = microphone_audio_path;
     session.status = SessionStatus::Processing;
     session.error = None;
     Ok(session)

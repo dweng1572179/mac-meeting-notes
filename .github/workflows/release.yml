@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v0.1.1']
+    tags: ['v0.2.0']
 
 permissions:
   contents: write
@@ -25,12 +25,12 @@ jobs:
         run: |
           mount_dir=$(mktemp -d)
           trap 'hdiutil detach "$mount_dir"' EXIT
-          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.1.1_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.0_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
           codesign --verify --deep --strict --verbose=4 "$mount_dir/Meeting Notes.app"
-      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.1.1_aarch64.dmg" Meeting-Notes.dmg
+      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.0_aarch64.dmg" Meeting-Notes.dmg
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
           --title "Meeting Notes $GITHUB_REF_NAME"
-          --notes "Ad-hoc signed beta: copy Meeting Notes to Applications. On macOS 14, right-click the app and choose Open once. On macOS 15 or later, first try opening the app and dismiss the warning, then go to System Settings → Privacy & Security → Open Anyway and confirm opening Meeting Notes."
+          --notes "Adds simultaneous microphone and computer-audio capture, local meeting folders, and source-linked questions across meetings. Ad-hoc signed beta: replace any existing Meeting Notes app rather than keeping both. On macOS 15 or later, first try opening the app, then use System Settings → Privacy & Security → Open Anyway once."
         env:
           GH_TOKEN: ${{ github.token }}

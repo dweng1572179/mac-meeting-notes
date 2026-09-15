@@ -52,6 +52,7 @@
   let title = $state(initial(() => session.title));
   let context = $state(initial(() => session.context));
   let attendees = $state(initial(() => session.attendees.join(', ')));
+  let folder = $state(initial(() => session.folder));
   let originalNotes = $state(initial(() => session.originalNotes));
   let view = $state<MeetingView>(
     initial(() => (session.status === 'complete' ? 'enhanced' : 'original'))
@@ -104,6 +105,7 @@
       title,
       context,
       attendees: attendees.split(',').map((name) => name.trim()).filter(Boolean),
+      folder,
       originalNotes
     };
   }
@@ -125,6 +127,11 @@
 
   function updateAttendees(event: Event) {
     attendees = (event.currentTarget as HTMLInputElement).value;
+    scheduleSave();
+  }
+
+  function updateFolder(event: Event) {
+    folder = (event.currentTarget as HTMLInputElement).value;
     scheduleSave();
   }
 
@@ -223,6 +230,14 @@
           placeholder="What should this meeting accomplish?"
         ></textarea>
       </label>
+      <label>
+        <span>Folder</span>
+        <input
+          value={folder}
+          oninput={updateFolder}
+          placeholder="Acquisitions, leasing, or another project"
+        />
+      </label>
     </div>
   </header>
 
@@ -302,7 +317,7 @@
     <p class="settings-copy">
       {#if confirmation === 'transcript'}
         The transcript and enhanced notes will be permanently removed. Your original notes and any retained audio will stay.
-      {:else if session.audioPath !== null}
+      {:else if session.audioPath !== null || session.microphoneAudioPath !== null}
         This meeting, its notes, and its retained audio recording will be permanently removed.
       {:else}
         This meeting and its notes will be permanently removed. There is no retained audio recording to remove.

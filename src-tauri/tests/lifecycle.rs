@@ -1,11 +1,12 @@
 use meeting_notes_lib::commands::{
-    interrupted_recording, needs_transcription, recover_interrupted, recover_interrupted_sessions,
-    retry_start, stop_recording_in_store_on_exit, transcript_deleted,
+    combine_transcripts, interrupted_recording, needs_transcription, recover_interrupted,
+    recover_interrupted_sessions, retry_start, stop_recording_in_store_on_exit, transcript_deleted,
 };
 use meeting_notes_lib::domain::{
     transition_to_failed, transition_to_processing, AppError, CreateSessionInput, Session,
     SessionStatus,
 };
+use meeting_notes_lib::recorder::RecordingFiles;
 use meeting_notes_lib::store::SessionStore;
 
 fn session(status: SessionStatus) -> Session {
@@ -40,10 +41,19 @@ fn failed_with_transcript() -> Session {
 #[test]
 fn stop_persists_before_processing() {
     let session = recording_session();
-    let stopped = transition_to_processing(session, "/tmp/example.m4a").unwrap();
+    let stopped = transition_to_processing(
+        session,
+        "/tmp/example.m4a",
+        Some("/tmp/example-mic.m4a".into()),
+    )
+    .unwrap();
     assert_eq!(stopped.status, SessionStatus::Processing);
     assert!(stopped.ended_at.is_some());
     assert_eq!(stopped.audio_path.as_deref(), Some("/tmp/example.m4a"));
+    assert_eq!(
+        stopped.microphone_audio_path.as_deref(),
+        Some("/tmp/example-mic.m4a")
+    );
 }
 
 #[test]
@@ -74,6 +84,29 @@ fn retry_with_transcript_skips_transcription() {
 }
 
 #[test]
+fn blank_transcript_is_retried() {
+    let mut retry = failed_with_transcript();
+    retry.transcript = Some(" \n ".into());
+
+    assert!(needs_transcription(&retry));
+}
+
+#[test]
+fn system_and_microphone_transcripts_keep_source_labels() {
+    let transcript = combine_transcripts("Remote words", "My words").unwrap();
+
+    assert_eq!(transcript, "Meeting audio:\nRemote words\n\nYou:\nMy words");
+}
+
+#[test]
+fn silent_recording_is_not_a_successful_transcript() {
+    let error = combine_transcripts(" \n", "\t").unwrap_err();
+
+    assert_eq!(error.code, "no_speech");
+    assert!(error.message.contains("audio was kept"));
+}
+
+#[test]
 fn transcript_deletion_returns_to_draft_without_changing_original_notes() {
     let reset = transcript_deleted(failed_with_transcript()).unwrap();
 
@@ -85,10 +118,21 @@ fn transcript_deletion_returns_to_draft_without_changing_original_notes() {
 
 #[test]
 fn normal_exit_marks_recording_failed_with_returned_audio() {
-    let interrupted = interrupted_recording(recording_session(), "/tmp/flushed.m4a").unwrap();
+    let interrupted = interrupted_recording(
+        recording_session(),
+        RecordingFiles {
+            system: "/tmp/flushed.m4a".into(),
+            microphone: "/tmp/flushed-mic.m4a".into(),
+        },
+    )
+    .unwrap();
 
     assert_eq!(interrupted.status, SessionStatus::Failed);
     assert_eq!(interrupted.audio_path.as_deref(), Some("/tmp/flushed.m4a"));
+    assert_eq!(
+        interrupted.microphone_audio_path.as_deref(),
+        Some("/tmp/flushed-mic.m4a")
+    );
     assert_eq!(interrupted.error.unwrap().code, "interrupted");
     assert!(interrupted.ended_at.is_some());
 }
@@ -147,15 +191,21 @@ fn exit_cleanup_is_idempotent_after_flushing_the_active_recorder() {
     let audio_dir = root.join("audio");
     std::fs::create_dir_all(&audio_dir).unwrap();
     let audio_path = audio_dir.join(format!("{}.m4a", recording.id));
+    let microphone_audio_path = audio_dir.join(format!("{}-mic.m4a", recording.id));
     std::fs::write(&audio_path, "audio").unwrap();
+    std::fs::write(&microphone_audio_path, "microphone audio").unwrap();
     recording.audio_path = Some(audio_path.to_string_lossy().into_owned());
+    recording.microphone_audio_path = Some(microphone_audio_path.to_string_lossy().into_owned());
     let id = recording.id.clone();
     store.save(&recording).unwrap();
     let mut stops = 0;
 
     stop_recording_in_store_on_exit(&store, |_| {
         stops += 1;
-        Ok(audio_path.clone())
+        Ok(RecordingFiles {
+            system: audio_path.clone(),
+            microphone: microphone_audio_path.clone(),
+        })
     })
     .unwrap();
     stop_recording_in_store_on_exit(&store, |_| panic!("recorder stopped twice")).unwrap();
@@ -164,5 +214,9 @@ fn exit_cleanup_is_idempotent_after_flushing_the_active_recorder() {
     let saved = store.get(&id).unwrap();
     assert_eq!(saved.status, SessionStatus::Failed);
     assert_eq!(saved.audio_path.as_deref(), recording.audio_path.as_deref());
+    assert_eq!(
+        saved.microphone_audio_path.as_deref(),
+        recording.microphone_audio_path.as_deref()
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

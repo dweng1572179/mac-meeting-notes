@@ -52,6 +52,9 @@ impl SessionStore {
         if let Some(path) = session.audio_path.as_deref() {
             self.validate_audio_path(&session.id, path)?;
         }
+        if let Some(path) = session.microphone_audio_path.as_deref() {
+            self.validate_microphone_audio_path(&session.id, path)?;
+        }
         let directory = self.sessions_dir()?;
         let json = serde_json::to_vec_pretty(session).map_err(json_error)?;
         let path = directory.join(format!("{}.json", session.id));
@@ -77,6 +80,9 @@ impl SessionStore {
         let session = self.get(id)?;
         if let Some(path) = session.audio_path.as_deref() {
             self.validate_audio_path(id, path)?;
+        }
+        if let Some(path) = session.microphone_audio_path.as_deref() {
+            self.validate_microphone_audio_path(id, path)?;
         }
 
         let sessions_directory = self.sessions_dir()?;
@@ -104,9 +110,26 @@ impl SessionStore {
     }
 
     pub(crate) fn validate_audio_path(&self, id: &str, audio_path: &str) -> AppResult<PathBuf> {
+        self.validate_named_audio_path(id, audio_path, &format!("{id}.m4a"))
+    }
+
+    pub(crate) fn validate_microphone_audio_path(
+        &self,
+        id: &str,
+        audio_path: &str,
+    ) -> AppResult<PathBuf> {
+        self.validate_named_audio_path(id, audio_path, &format!("{id}-mic.m4a"))
+    }
+
+    fn validate_named_audio_path(
+        &self,
+        id: &str,
+        audio_path: &str,
+        filename: &str,
+    ) -> AppResult<PathBuf> {
         self.validate_id(id)?;
         let audio_directory = self.root.join("audio");
-        let expected = audio_directory.join(format!("{id}.m4a"));
+        let expected = audio_directory.join(filename);
         let audio_path = PathBuf::from(audio_path);
         if audio_path != expected {
             return Err(invalid_audio_path());
@@ -157,13 +180,26 @@ impl SessionStore {
                 "Deletion marker does not match its session",
             ));
         }
-        if let Some(audio_path) = session.audio_path.as_deref() {
-            let audio_path = self.validate_audio_path(id, audio_path)?;
+        let audio_paths = [
+            session
+                .audio_path
+                .as_deref()
+                .map(|path| self.validate_audio_path(id, path)),
+            session
+                .microphone_audio_path
+                .as_deref()
+                .map(|path| self.validate_microphone_audio_path(id, path)),
+        ];
+        let mut removed_audio = false;
+        for audio_path in audio_paths.into_iter().flatten() {
+            let audio_path = audio_path?;
             match fs::remove_file(audio_path) {
-                Ok(()) => {}
+                Ok(()) => removed_audio = true,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(io_error(error)),
             }
+        }
+        if removed_audio {
             sync_directory(&self.root.join("audio"))?;
         }
         fs::remove_file(tombstone_path).map_err(io_error)?;

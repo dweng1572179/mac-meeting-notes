@@ -57,3 +57,23 @@ test('the prevented close handshake is authorized to destroy only the main windo
     delete globalThis.window;
   }
 });
+
+test('meeting questions send the selected folder and question to the native core', async () => {
+  globalThis.window = {};
+  mockIPC((command, payload) => {
+    assert.equal(command, 'ask_meetings');
+    assert.deepEqual(payload, { folder: 'Acquisitions', question: 'What is still open?' });
+    return {
+      answer: 'The rent roll remains open.',
+      citations: [
+        { sessionId: 'meeting-1', title: 'Harbor review', excerpt: 'Verify the rent roll.' }
+      ]
+    };
+  });
+  try {
+    const answer = await api.askMeetings('Acquisitions', 'What is still open?');
+    assert.equal(answer.citations[0].sessionId, 'meeting-1');
+  } finally {
+    delete globalThis.window;
+  }
+});

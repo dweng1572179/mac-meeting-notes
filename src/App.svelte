@@ -7,6 +7,7 @@
     deleteTranscript,
     onSessionUpdated
   } from './lib/api';
+  import LibraryView from './lib/LibraryView.svelte';
   import MeetingEditor from './lib/MeetingEditor.svelte';
   import SettingsDialog from './lib/SettingsDialog.svelte';
   import Sidebar from './lib/Sidebar.svelte';
@@ -14,6 +15,7 @@
 
   let sessions = $state<Session[]>([]);
   let selectedId = $state<string | null>(null);
+  let selectedFolder = $state<string | null>(null);
   let hasApiKey = $state(false);
   let settingsOpen = $state(false);
   let loading = $state(true);
@@ -27,7 +29,7 @@
     bootstrap()
       .then((data) => {
         sessions = data.sessions;
-        selectedId = sessions[0]?.id ?? null;
+        selectedId = null;
         hasApiKey = data.hasApiKey;
       })
       .catch(() => {
@@ -83,6 +85,17 @@
     }
   }
 
+  async function selectLibrary(folder: string | null) {
+    error = '';
+    try {
+      await editor?.flush();
+      selectedId = null;
+      selectedFolder = folder;
+    } catch {
+      error = 'Save this note before switching views.';
+    }
+  }
+
   async function removeTranscript(id: string) {
     if (id === selectedId) await editor?.flush();
     updateSession(await deleteTranscript(id));
@@ -93,6 +106,9 @@
     await deleteSession(id);
     sessions = sessions.filter((session) => session.id !== id);
     if (id === selectedId) selectedId = null;
+    if (selectedFolder && !sessions.some((session) => session.folder === selectedFolder)) {
+      selectedFolder = null;
+    }
     const { [id]: _removed, ...active } = recordingBaselines;
     recordingBaselines = active;
   }
@@ -102,10 +118,12 @@
   <Sidebar
     {sessions}
     {selectedId}
+    {selectedFolder}
     {creating}
-    onHome={() => selectSession(null)}
+    onHome={() => selectLibrary(null)}
     onNewNote={newNote}
     onSelect={selectSession}
+    onFolder={(folder) => selectLibrary(folder)}
     onSettings={() => (settingsOpen = true)}
   />
 
@@ -131,14 +149,16 @@
         />
       {/key}
     {:else}
-      <section class="library-empty" aria-labelledby="empty-title">
-        <p>{sessions.length ? 'Meeting library' : 'Your meeting library'}</p>
-        <h1 id="empty-title">{sessions.length ? 'Choose a note to continue.' : 'Make the call easier to remember.'}</h1>
-        <p>{sessions.length ? 'Select a recent meeting from the sidebar.' : 'Create a note before your next meeting. It will stay here when the call ends.'}</p>
-        {#if !sessions.length}
-          <button type="button" onclick={newNote}>New note</button>
-        {/if}
-      </section>
+      {#key selectedFolder}
+        <LibraryView
+          {sessions}
+          {hasApiKey}
+          folder={selectedFolder}
+          onSelect={selectSession}
+          onNewNote={newNote}
+          onOpenSettings={() => (settingsOpen = true)}
+        />
+      {/key}
     {/if}
   </main>
 </div>

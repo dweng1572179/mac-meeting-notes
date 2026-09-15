@@ -107,6 +107,39 @@ fn original_notes_survive_reopen() {
 }
 
 #[test]
+fn legacy_session_without_microphone_audio_path_reopens() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let json = serde_json::json!({
+        "id": id,
+        "title": "Legacy meeting",
+        "startedAt": "2026-09-15T10:00:00Z",
+        "endedAt": null,
+        "context": "",
+        "attendees": [],
+        "originalNotes": "",
+        "transcript": null,
+        "enrichedNotes": null,
+        "status": "draft",
+        "error": null,
+        "audioPath": null
+    });
+    std::fs::write(
+        sessions_dir.join(format!("{id}.json")),
+        serde_json::to_vec_pretty(&json).unwrap(),
+    )
+    .unwrap();
+
+    let reopened = SessionStore::new(root.clone()).get(&id).unwrap();
+
+    assert_eq!(reopened.folder, "");
+    assert_eq!(reopened.microphone_audio_path, None);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn update_with_different_id_leaves_session_unchanged() {
     let mut session = Session::new(CreateSessionInput {
         title: "Original title".into(),
@@ -120,6 +153,7 @@ fn update_with_different_id_leaves_session_unchanged() {
         title: "Changed title".into(),
         context: "Changed context".into(),
         attendees: vec!["Changed attendee".into()],
+        folder: "Changed folder".into(),
         original_notes: "Changed notes".into(),
     });
 
@@ -188,8 +222,11 @@ fn delete_removes_session_and_its_contained_audio() {
         attendees: Vec::new(),
     });
     let audio_path = audio_dir.join(format!("{}.m4a", session.id));
+    let microphone_audio_path = audio_dir.join(format!("{}-mic.m4a", session.id));
     std::fs::write(&audio_path, "meeting audio").unwrap();
+    std::fs::write(&microphone_audio_path, "microphone audio").unwrap();
     session.audio_path = Some(audio_path.to_string_lossy().into_owned());
+    session.microphone_audio_path = Some(microphone_audio_path.to_string_lossy().into_owned());
     store.save(&session).unwrap();
     let session_path = root.join("sessions").join(format!("{}.json", session.id));
 
@@ -197,6 +234,53 @@ fn delete_removes_session_and_its_contained_audio() {
 
     assert!(!session_path.exists());
     assert!(!audio_path.exists());
+    assert!(!microphone_audio_path.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn delete_without_audio_removes_its_tombstone() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    store.save(&session).unwrap();
+
+    store.delete(&session.id).unwrap();
+
+    assert!(!root
+        .join("sessions")
+        .join(format!("{}.json.deleting", session.id))
+        .exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn save_rejects_microphone_audio_that_belongs_to_another_session() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let audio_dir = root.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let wrong_audio = audio_dir.join("another-session-mic.m4a");
+    std::fs::write(&wrong_audio, "audio").unwrap();
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    session.microphone_audio_path = Some(wrong_audio.to_string_lossy().into_owned());
+
+    let error = store.save(&session).unwrap_err();
+
+    assert_eq!(error.code, "invalid_audio_path");
+    assert!(wrong_audio.exists());
+    assert!(!root
+        .join("sessions")
+        .join(format!("{}.json", session.id))
+        .exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 

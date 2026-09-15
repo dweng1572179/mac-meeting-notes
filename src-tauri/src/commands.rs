@@ -10,15 +10,16 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::{
     domain::{
         transition_to_failed, transition_to_processing, AppError, AppResult, CreateSessionInput,
-        Session, SessionStatus, UpdateSessionInput,
+        MeetingAnswer, Session, SessionStatus, UpdateSessionInput,
     },
     openai::{sections_to_markdown, OpenAiClient},
-    recorder::{Recorder, RecordingInfo},
+    recorder::{Recorder, RecordingFiles, RecordingInfo},
     secrets::ApiKeyStore,
     store::SessionStore,
 };
 
 const SESSION_UPDATED: &str = "session-updated";
+const QUESTION_SESSION_LIMIT: usize = 20;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,15 +76,22 @@ pub fn start_recording(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<RecordingInfo> {
-    let path = audio_path(&app, &id)?;
-    start_recording_state(&state, &id, path, |id, path| state.recorder.start(id, path))
+    let (system_path, microphone_path) = audio_paths(&app, &id)?;
+    start_recording_state(
+        &state,
+        &id,
+        system_path,
+        microphone_path,
+        |id, system_path, microphone_path| state.recorder.start(id, system_path, microphone_path),
+    )
 }
 
 fn start_recording_state(
     state: &AppState,
     id: &str,
-    audio_path: PathBuf,
-    start: impl FnOnce(&str, &std::path::Path) -> AppResult<RecordingInfo>,
+    system_path: PathBuf,
+    microphone_path: PathBuf,
+    start: impl FnOnce(&str, &std::path::Path, &std::path::Path) -> AppResult<RecordingInfo>,
 ) -> AppResult<RecordingInfo> {
     let session = load_session(state, id)?;
     if session.status != SessionStatus::Draft {
@@ -92,16 +100,31 @@ fn start_recording_state(
 
     state
         .store
-        .validate_audio_path(id, &audio_path.to_string_lossy())?;
-    if let Some(parent) = audio_path.parent() {
+        .validate_audio_path(id, &system_path.to_string_lossy())?;
+    state
+        .store
+        .validate_microphone_audio_path(id, &microphone_path.to_string_lossy())?;
+    if let Some(parent) = system_path.parent() {
         fs::create_dir_all(parent).map_err(storage_error)?;
     }
-    let recording = start(&session.id, &audio_path)?;
-    if let Err(error) = persist_recording(state, id, audio_path.to_string_lossy().into_owned()) {
+    let recording = start(&session.id, &system_path, &microphone_path)?;
+    if let Err(error) = persist_recording(
+        state,
+        id,
+        system_path.to_string_lossy().into_owned(),
+        microphone_path.to_string_lossy().into_owned(),
+    ) {
         let _ = state.recorder.stop(&session.id);
-        if let Ok(path) = state
-            .store
-            .validate_audio_path(id, &audio_path.to_string_lossy())
+        for path in [
+            state
+                .store
+                .validate_audio_path(id, &system_path.to_string_lossy()),
+            state
+                .store
+                .validate_microphone_audio_path(id, &microphone_path.to_string_lossy()),
+        ]
+        .into_iter()
+        .flatten()
         {
             let _ = fs::remove_file(path);
         }
@@ -126,7 +149,7 @@ pub fn stop_recording(
 fn stop_recording_state(
     state: &AppState,
     id: &str,
-    stop: impl FnOnce(&str) -> AppResult<PathBuf>,
+    stop: impl FnOnce(&str) -> AppResult<RecordingFiles>,
 ) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
     let original = state.store.get(id)?;
@@ -134,9 +157,11 @@ fn stop_recording_state(
         return Err(invalid_status("Only a recording session can be stopped"));
     }
     let mut session = match stop(id) {
-        Ok(path) => {
-            transition_to_processing(original.clone(), path.to_string_lossy().into_owned())?
-        }
+        Ok(paths) => transition_to_processing(
+            original.clone(),
+            paths.system.to_string_lossy().into_owned(),
+            Some(paths.microphone.to_string_lossy().into_owned()),
+        )?,
         Err(error) => transition_to_failed(original.clone(), error),
     };
     session.ended_at.get_or_insert_with(now);
@@ -185,6 +210,61 @@ pub fn has_api_key() -> AppResult<bool> {
     ApiKeyStore::exists()
 }
 
+#[tauri::command]
+pub async fn ask_meetings(
+    state: State<'_, AppState>,
+    folder: Option<String>,
+    question: String,
+) -> AppResult<MeetingAnswer> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err(AppError::new("invalid_question", "Enter a question"));
+    }
+    let sessions = {
+        let _guard = lock_sessions(&state)?;
+        eligible_meetings(state.store.list()?, folder.as_deref())
+    };
+    if sessions.is_empty() {
+        return Err(AppError::new(
+            "no_meeting_sources",
+            "No completed meetings with source material are available here yet",
+        ));
+    }
+    let api_key = ApiKeyStore::load()?
+        .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
+    state
+        .openai
+        .ask_meetings(&sessions, question, &api_key)
+        .await
+}
+
+fn eligible_meetings(sessions: Vec<Session>, folder: Option<&str>) -> Vec<Session> {
+    sessions
+        .into_iter()
+        .filter(|session| {
+            session.status == SessionStatus::Complete
+                && match folder {
+                    Some(folder) => session.folder == folder,
+                    None => true,
+                }
+                && has_meeting_material(session)
+        })
+        // ponytail: recent bounded context avoids a retrieval/database layer; add local retrieval when real libraries outgrow 20 meetings.
+        .take(QUESTION_SESSION_LIMIT)
+        .collect()
+}
+
+fn has_meeting_material(session: &Session) -> bool {
+    [
+        session.context.as_str(),
+        session.original_notes.as_str(),
+        session.transcript.as_deref().unwrap_or_default(),
+        session.enriched_notes.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .any(|text| !text.trim().is_empty())
+}
+
 pub fn setup(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error::Error>> {
     let root = app.path().app_data_dir()?;
     fs::create_dir_all(&root)?;
@@ -202,7 +282,7 @@ pub fn stop_recording_on_exit(app: &AppHandle) -> AppResult<()> {
 
 pub fn stop_recording_in_store_on_exit<F>(store: &SessionStore, stop: F) -> AppResult<()>
 where
-    F: FnOnce(&str) -> AppResult<PathBuf>,
+    F: FnOnce(&str) -> AppResult<RecordingFiles>,
 {
     let Some(session) = store
         .list()?
@@ -213,7 +293,7 @@ where
     };
 
     let stopped = match stop(&session.id) {
-        Ok(path) => interrupted_recording(session, path.to_string_lossy().into_owned())?,
+        Ok(paths) => interrupted_recording(session, paths)?,
         Err(stop_error) => {
             let failed = recover_interrupted(session);
             store.save(&failed)?;
@@ -238,9 +318,20 @@ async fn process_session(app: &AppHandle, id: &str) -> AppResult<()> {
         .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
 
     if needs_transcription(&session) {
-        let path = retained_audio_path(&state, &session)?
-            .ok_or_else(|| AppError::new("audio_file", "Recorded audio is unavailable"))?;
-        let transcript = state.openai.transcribe(&path, &api_key).await?;
+        let system_path = retained_audio_path(&state, &session)?;
+        let microphone_path = retained_microphone_audio_path(&state, &session)?;
+        if system_path.is_none() && microphone_path.is_none() {
+            return Err(AppError::new("audio_file", "Recorded audio is unavailable"));
+        }
+        let system_transcript = match system_path {
+            Some(path) => state.openai.transcribe(&path, &api_key).await?,
+            None => String::new(),
+        };
+        let microphone_transcript = match microphone_path {
+            Some(path) => state.openai.transcribe(&path, &api_key).await?,
+            None => String::new(),
+        };
+        let transcript = combine_transcripts(&system_transcript, &microphone_transcript)?;
         persist_transcript(&state, id, transcript)?;
     }
 
@@ -272,13 +363,19 @@ fn save_session_state(state: &AppState, input: UpdateSessionInput) -> AppResult<
     Ok(session)
 }
 
-fn persist_recording(state: &AppState, id: &str, audio_path: String) -> AppResult<Session> {
+fn persist_recording(
+    state: &AppState,
+    id: &str,
+    audio_path: String,
+    microphone_audio_path: String,
+) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
     let mut session = state.store.get(id)?;
     if session.status != SessionStatus::Draft {
         return Err(invalid_status("Only a draft session can start recording"));
     }
     session.audio_path = Some(audio_path);
+    session.microphone_audio_path = Some(microphone_audio_path);
     session.status = SessionStatus::Recording;
     session.error = None;
     state.store.save(&session)?;
@@ -303,7 +400,28 @@ pub fn retry_start(mut session: Session) -> AppResult<Session> {
 }
 
 pub fn needs_transcription(session: &Session) -> bool {
-    session.transcript.is_none()
+    match session.transcript.as_deref() {
+        Some(transcript) => transcript.trim().is_empty(),
+        None => true,
+    }
+}
+
+pub fn combine_transcripts(system: &str, microphone: &str) -> AppResult<String> {
+    let mut sources = Vec::new();
+    if !system.trim().is_empty() {
+        sources.push(format!("Meeting audio:\n{}", system.trim()));
+    }
+    if !microphone.trim().is_empty() {
+        sources.push(format!("You:\n{}", microphone.trim()));
+    }
+    if sources.is_empty() {
+        Err(AppError::new(
+            "no_speech",
+            "No speech was detected. Your audio was kept so you can retry.",
+        ))
+    } else {
+        Ok(sources.join("\n\n"))
+    }
 }
 
 fn delete_session_state(state: &AppState, id: &str) -> AppResult<()> {
@@ -354,13 +472,16 @@ fn persist_transcript(state: &AppState, id: &str, transcript: String) -> AppResu
 fn remove_retained_audio(state: &AppState, id: &str) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
     let mut session = state.store.get(id)?;
-    if let Some(path) = retained_audio_path(state, &session)? {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(storage_error(error)),
+    let retained = [
+        retained_audio_path(state, &session)?,
+        retained_microphone_audio_path(state, &session)?,
+    ];
+    if retained.iter().any(Option::is_some) {
+        for path in retained.into_iter().flatten() {
+            remove_audio_file(path)?;
         }
         session.audio_path = None;
+        session.microphone_audio_path = None;
         state.store.save(&session)?;
     }
     Ok(session)
@@ -412,17 +533,25 @@ pub fn recover_interrupted(mut session: Session) -> Session {
     transition_to_failed(session, AppError::new("interrupted", message))
 }
 
-pub fn interrupted_recording(
-    session: Session,
-    audio_path: impl Into<String>,
-) -> AppResult<Session> {
-    transition_to_processing(session, audio_path).map(recover_interrupted)
+pub fn interrupted_recording(session: Session, paths: RecordingFiles) -> AppResult<Session> {
+    transition_to_processing(
+        session,
+        paths.system.to_string_lossy().into_owned(),
+        Some(paths.microphone.to_string_lossy().into_owned()),
+    )
+    .map(recover_interrupted)
 }
 
-fn audio_path(app: &AppHandle, id: &str) -> AppResult<PathBuf> {
+fn audio_paths(app: &AppHandle, id: &str) -> AppResult<(PathBuf, PathBuf)> {
     app.path()
         .app_data_dir()
-        .map(|root| root.join("audio").join(format!("{id}.m4a")))
+        .map(|root| {
+            let audio = root.join("audio");
+            (
+                audio.join(format!("{id}.m4a")),
+                audio.join(format!("{id}-mic.m4a")),
+            )
+        })
         .map_err(|error| AppError::new("storage_error", error.to_string()))
 }
 
@@ -432,6 +561,29 @@ fn retained_audio_path(state: &AppState, session: &Session) -> AppResult<Option<
         .as_deref()
         .map(|saved| state.store.validate_audio_path(&session.id, saved))
         .transpose()
+}
+
+fn retained_microphone_audio_path(
+    state: &AppState,
+    session: &Session,
+) -> AppResult<Option<PathBuf>> {
+    session
+        .microphone_audio_path
+        .as_deref()
+        .map(|saved| {
+            state
+                .store
+                .validate_microphone_audio_path(&session.id, saved)
+        })
+        .transpose()
+}
+
+fn remove_audio_file(path: PathBuf) -> AppResult<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage_error(error)),
+    }
 }
 
 fn invalid_status(message: &str) -> AppError {
@@ -462,6 +614,7 @@ mod tests {
 
     use crate::{
         domain::{AppError, CreateSessionInput, Session, SessionStatus, UpdateSessionInput},
+        recorder::RecordingFiles,
         store::SessionStore,
     };
 
@@ -477,6 +630,7 @@ mod tests {
                 fs::write(&victim, "untouched").unwrap();
             }
             let path = root.join("audio").join(format!("{id}.m4a"));
+            let microphone_path = root.join("audio").join(format!("{id}-mic.m4a"));
             if destination == "directory" {
                 symlink(root.join("outside"), root.join("audio")).unwrap();
             } else {
@@ -484,10 +638,11 @@ mod tests {
                 symlink(&victim, &path).unwrap();
             }
             let mut started = false;
-            let result = super::start_recording_state(&state, &id, path, |_, _| {
-                started = true;
-                Err(AppError::new("native_reached", "must validate first"))
-            });
+            let result =
+                super::start_recording_state(&state, &id, path, microphone_path, |_, _, _| {
+                    started = true;
+                    Err(AppError::new("native_reached", "must validate first"))
+                });
             fs::remove_dir_all(root).unwrap();
             assert!(
                 !started,
@@ -503,17 +658,23 @@ mod tests {
         let (state, root, id) = state(SessionStatus::Recording);
         fs::create_dir(root.join("audio")).unwrap();
         let path = root.join("audio").join(format!("{id}.m4a"));
+        let microphone_path = root.join("audio").join(format!("{id}-mic.m4a"));
         fs::write(&path, "retryable audio").unwrap();
+        fs::write(&microphone_path, "retryable microphone audio").unwrap();
         let mut recording = state.store.get(&id).unwrap();
         recording.original_notes = "rent roll".into();
         recording.audio_path = Some(path.to_string_lossy().into_owned());
+        recording.microphone_audio_path = Some(microphone_path.to_string_lossy().into_owned());
         state.store.save(&recording).unwrap();
         if fail_save {
             fs::set_permissions(root.join("sessions"), fs::Permissions::from_mode(0o500)).unwrap();
         }
         let result = super::stop_recording_state(&state, &id, |_| {
             if fail_save {
-                Ok(path.clone())
+                Ok(RecordingFiles {
+                    system: path.clone(),
+                    microphone: microphone_path.clone(),
+                })
             } else {
                 Err(AppError::new("audio_capture", "writer finalization failed"))
             }
@@ -528,6 +689,10 @@ mod tests {
         assert_eq!(published.status, SessionStatus::Failed);
         assert_eq!(published.original_notes, "rent roll");
         assert_eq!(published.audio_path, recording.audio_path);
+        assert_eq!(
+            published.microphone_audio_path,
+            recording.microphone_audio_path
+        );
         assert!(published.ended_at.is_some());
         assert_eq!(
             published.error.unwrap().code,
@@ -575,6 +740,7 @@ mod tests {
             title: "Weekly review".into(),
             context: String::new(),
             attendees: Vec::new(),
+            folder: String::new(),
             original_notes: "rent roll".into(),
         }
     }
@@ -625,6 +791,58 @@ mod tests {
         assert_eq!(retry.original_notes, "rent roll");
         assert_eq!(retry.audio_path, session.audio_path);
         assert_eq!(audio, "retryable audio");
+    }
+
+    #[test]
+    fn successful_transcription_cleanup_removes_both_audio_files() {
+        let (state, root, id) = state(SessionStatus::Processing);
+        let audio_dir = root.join("audio");
+        fs::create_dir(&audio_dir).unwrap();
+        let system_path = audio_dir.join(format!("{id}.m4a"));
+        let microphone_path = audio_dir.join(format!("{id}-mic.m4a"));
+        fs::write(&system_path, "system audio").unwrap();
+        fs::write(&microphone_path, "microphone audio").unwrap();
+        let mut session = state.store.get(&id).unwrap();
+        session.audio_path = Some(system_path.to_string_lossy().into_owned());
+        session.microphone_audio_path = Some(microphone_path.to_string_lossy().into_owned());
+        session.transcript = Some("Meeting audio:\nremote\n\nYou:\nlocal".into());
+        state.store.save(&session).unwrap();
+
+        let cleaned = super::remove_retained_audio(&state, &id).unwrap();
+
+        assert_eq!(cleaned.audio_path, None);
+        assert_eq!(cleaned.microphone_audio_path, None);
+        assert!(!system_path.exists());
+        assert!(!microphone_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_question_sources_are_completed_material_from_that_folder() {
+        let mut included = Session::new(CreateSessionInput {
+            title: "Included".into(),
+            context: String::new(),
+            attendees: Vec::new(),
+        });
+        included.folder = "Acquisitions".into();
+        included.status = SessionStatus::Complete;
+        included.transcript = Some("source".into());
+        let mut wrong_folder = included.clone();
+        wrong_folder.id = "wrong-folder".into();
+        wrong_folder.folder = "Leasing".into();
+        let mut draft = included.clone();
+        draft.id = "draft".into();
+        draft.status = SessionStatus::Draft;
+        let mut empty = included.clone();
+        empty.id = "empty".into();
+        empty.transcript = None;
+
+        let eligible = super::eligible_meetings(
+            vec![included.clone(), wrong_folder, draft, empty],
+            Some("Acquisitions"),
+        );
+
+        assert_eq!(eligible, vec![included]);
     }
 
     #[test]

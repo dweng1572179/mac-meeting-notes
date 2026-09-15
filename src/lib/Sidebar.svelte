@@ -1,21 +1,26 @@
 <script lang="ts">
+  import { foldersFor } from './library';
   import type { Session } from './types';
 
   let {
     sessions,
     selectedId,
+    selectedFolder,
     creating = false,
     onHome,
     onNewNote,
     onSelect,
+    onFolder,
     onSettings
   }: {
     sessions: Session[];
     selectedId: string | null;
+    selectedFolder: string | null;
     creating?: boolean;
     onHome: () => void;
     onNewNote: () => void;
     onSelect: (id: string) => void;
+    onFolder: (folder: string) => void;
     onSettings: () => void;
   } = $props();
 
@@ -25,6 +30,7 @@
       `${session.title} ${session.context}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
     )
   );
+  let folders = $derived(foldersFor(sessions));
 
   function sessionDate(startedAt: string) {
     return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(
@@ -47,9 +53,9 @@
     </label>
 
     <nav aria-label="Primary">
-      <button class="nav-item" class:active={!selectedId} aria-current={!selectedId ? 'page' : undefined} type="button" onclick={onHome}>
+      <button class="nav-item" class:active={!selectedId && selectedFolder === null} aria-current={!selectedId && selectedFolder === null ? 'page' : undefined} type="button" onclick={onHome}>
         <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M3.5 9 10 3.5 16.5 9v7.5h-5v-4h-3v4h-5Z"></path></svg>
-        <span>Home</span>
+        <span>All meetings</span>
       </button>
       <button class="nav-item" type="button" disabled={creating} onclick={onNewNote}>
         <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"></path></svg>
@@ -57,6 +63,24 @@
       </button>
     </nav>
   </div>
+
+  {#if folders.length}
+    <nav class="folder-nav" aria-label="Folders">
+      <h2>Folders</h2>
+      {#each folders as folder}
+        <button
+          class="folder-item"
+          class:active={!selectedId && selectedFolder === folder}
+          aria-current={!selectedId && selectedFolder === folder ? 'page' : undefined}
+          type="button"
+          onclick={() => onFolder(folder)}
+        >
+          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M2.8 5.5h5l1.5 1.7h7.9v8.1H2.8Z"></path></svg>
+          <span>{folder}</span>
+        </button>
+      {/each}
+    </nav>
+  {/if}
 
   <div class="recent">
     <h2>Recent</h2>
