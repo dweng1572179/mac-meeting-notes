@@ -66,6 +66,9 @@ impl OpenAiClient {
     pub async fn transcribe(&self, audio_path: &Path, api_key: &str) -> AppResult<String> {
         let audio = std::fs::read(audio_path)
             .map_err(|_| AppError::new("audio_file", "Unable to read recorded audio"))?;
+        if !has_m4a_media(&audio)? {
+            return Ok(String::new());
+        }
         let filename = audio_path
             .file_name()
             .and_then(|name| name.to_str())
@@ -376,4 +379,93 @@ fn ensure_success(status: StatusCode) -> AppResult<()> {
 
 fn openai_request_error(_: reqwest::Error) -> AppError {
     AppError::new("openai", "OpenAI request failed")
+}
+
+fn has_m4a_media(mut bytes: &[u8]) -> AppResult<bool> {
+    if bytes.is_empty() {
+        return Err(incomplete_audio());
+    }
+    while !bytes.is_empty() {
+        if bytes.len() < 8 {
+            return Err(incomplete_audio());
+        }
+        let declared = u32::from_be_bytes(bytes[..4].try_into().expect("four-byte atom size"));
+        let (size, header) = match declared {
+            0 => (bytes.len(), 8),
+            1 if bytes.len() >= 16 => (
+                usize::try_from(u64::from_be_bytes(
+                    bytes[8..16].try_into().expect("eight-byte atom size"),
+                ))
+                .map_err(|_| incomplete_audio())?,
+                16,
+            ),
+            1 => return Err(incomplete_audio()),
+            size => (size as usize, 8),
+        };
+        if size < header || size > bytes.len() {
+            return Err(incomplete_audio());
+        }
+        if &bytes[4..8] == b"mdat" && size > header {
+            return Ok(true);
+        }
+        bytes = &bytes[size..];
+    }
+    Ok(false)
+}
+
+fn incomplete_audio() -> AppError {
+    AppError::new(
+        "audio_file",
+        "Recorded audio is incomplete. Your audio was kept so you can retry.",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenAiClient;
+
+    #[test]
+    fn empty_m4a_is_not_sent_to_openai() {
+        let path =
+            std::env::temp_dir().join(format!("meeting-notes-empty-{}.m4a", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            [
+                0, 0, 0, 8, b'f', b't', b'y', b'p', 0, 0, 0, 8, b'm', b'o', b'o', b'v',
+            ],
+        )
+        .unwrap();
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:9/v1");
+
+        let transcript = tauri::async_runtime::block_on(client.transcribe(&path, "test-key"));
+
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(transcript.unwrap(), "");
+    }
+
+    #[test]
+    fn truncated_m4a_is_not_treated_as_silence() {
+        let path = std::env::temp_dir().join(format!(
+            "meeting-notes-truncated-{}.m4a",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, [0, 0, 0, 12, b'm', b'd', b'a', b't', 1]).unwrap();
+        let client = OpenAiClient::with_base_url("http://127.0.0.1:9/v1");
+
+        let error =
+            tauri::async_runtime::block_on(client.transcribe(&path, "test-key")).unwrap_err();
+
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(error.code, "audio_file");
+    }
+
+    #[test]
+    fn extended_and_later_mdat_boxes_are_supported() {
+        let bytes = [
+            0, 0, 0, 8, b'm', b'd', b'a', b't', 0, 0, 0, 1, b'm', b'd', b'a', b't', 0, 0, 0, 0, 0,
+            0, 0, 17, 1,
+        ];
+
+        assert!(super::has_m4a_media(&bytes).unwrap());
+    }
 }
