@@ -243,7 +243,10 @@ fn eligible_meetings(sessions: Vec<Session>, folder: Option<&str>) -> Vec<Sessio
         .into_iter()
         .filter(|session| {
             session.status == SessionStatus::Complete
-                && folder.is_none_or(|folder| session.folder == folder)
+                && match folder {
+                    Some(folder) => session.folder == folder,
+                    None => true,
+                }
                 && has_meeting_material(session)
         })
         // ponytail: recent bounded context avoids a retrieval/database layer; add local retrieval when real libraries outgrow 20 meetings.
@@ -397,10 +400,10 @@ pub fn retry_start(mut session: Session) -> AppResult<Session> {
 }
 
 pub fn needs_transcription(session: &Session) -> bool {
-    session
-        .transcript
-        .as_deref()
-        .is_none_or(|transcript| transcript.trim().is_empty())
+    match session.transcript.as_deref() {
+        Some(transcript) => transcript.trim().is_empty(),
+        None => true,
+    }
 }
 
 pub fn combine_transcripts(system: &str, microphone: &str) -> AppResult<String> {
