@@ -13,6 +13,7 @@ export type Session = {
   status: SessionStatus;
   error: { code: string; message: string } | null;
   audioPath: string | null;
+  microphoneAudioPath: string | null;
 };
 
 export type Bootstrap = { sessions: Session[]; hasApiKey: boolean };

@@ -23,7 +23,8 @@ const basePreviewSession: Session = {
     '## Decision\n\nAdvance to a detailed underwriting review.\n\n## Follow-ups\n\n- Request the current rent roll and roof report\n- Revisit the south-bay rent assumption',
   status: 'complete',
   error: null,
-  audioPath: null
+  audioPath: null,
+  microphoneAudioPath: null
 };
 
 const isNative = () => '__TAURI_INTERNALS__' in window;
@@ -51,6 +52,9 @@ function previewState(): Session {
         : null,
     audioPath: ['recording', 'processing', 'failed'].includes(selectedStatus)
       ? '/tmp/simulation-riverside-logistics.m4a'
+      : null,
+    microphoneAudioPath: ['recording', 'processing', 'failed'].includes(selectedStatus)
+      ? '/tmp/simulation-riverside-logistics-mic.m4a'
       : null
   };
 }

@@ -35,6 +35,8 @@ pub struct Session {
     pub status: SessionStatus,
     pub error: Option<AppError>,
     pub audio_path: Option<String>,
+    #[serde(default)]
+    pub microphone_audio_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,6 +87,7 @@ impl Session {
             status: SessionStatus::Draft,
             error: None,
             audio_path: None,
+            microphone_audio_path: None,
         }
     }
 
