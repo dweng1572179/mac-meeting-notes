@@ -17,6 +17,7 @@ pub struct UpdateSessionInput {
     pub title: String,
     pub context: String,
     pub attendees: Vec<String>,
+    pub folder: String,
     pub original_notes: String,
 }
 
@@ -29,6 +30,8 @@ pub struct Session {
     pub ended_at: Option<String>,
     pub context: String,
     pub attendees: Vec<String>,
+    #[serde(default)]
+    pub folder: String,
     pub original_notes: String,
     pub transcript: Option<String>,
     pub enriched_notes: Option<String>,
@@ -81,6 +84,7 @@ impl Session {
             ended_at: None,
             context: input.context,
             attendees: input.attendees,
+            folder: String::new(),
             original_notes: String::new(),
             transcript: None,
             enriched_notes: None,
@@ -101,6 +105,7 @@ impl Session {
         self.title = input.title;
         self.context = input.context;
         self.attendees = input.attendees;
+        self.folder = input.folder.trim().to_owned();
         self.original_notes = input.original_notes;
         Ok(())
     }

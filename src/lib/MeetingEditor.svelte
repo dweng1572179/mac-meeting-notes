@@ -52,6 +52,7 @@
   let title = $state(initial(() => session.title));
   let context = $state(initial(() => session.context));
   let attendees = $state(initial(() => session.attendees.join(', ')));
+  let folder = $state(initial(() => session.folder));
   let originalNotes = $state(initial(() => session.originalNotes));
   let view = $state<MeetingView>(
     initial(() => (session.status === 'complete' ? 'enhanced' : 'original'))
@@ -104,6 +105,7 @@
       title,
       context,
       attendees: attendees.split(',').map((name) => name.trim()).filter(Boolean),
+      folder,
       originalNotes
     };
   }
@@ -125,6 +127,11 @@
 
   function updateAttendees(event: Event) {
     attendees = (event.currentTarget as HTMLInputElement).value;
+    scheduleSave();
+  }
+
+  function updateFolder(event: Event) {
+    folder = (event.currentTarget as HTMLInputElement).value;
     scheduleSave();
   }
 
@@ -222,6 +229,14 @@
           rows="2"
           placeholder="What should this meeting accomplish?"
         ></textarea>
+      </label>
+      <label>
+        <span>Folder</span>
+        <input
+          value={folder}
+          oninput={updateFolder}
+          placeholder="Acquisitions, leasing, or another project"
+        />
       </label>
     </div>
   </header>

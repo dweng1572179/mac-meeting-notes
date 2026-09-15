@@ -134,6 +134,7 @@ fn legacy_session_without_microphone_audio_path_reopens() {
 
     let reopened = SessionStore::new(root.clone()).get(&id).unwrap();
 
+    assert_eq!(reopened.folder, "");
     assert_eq!(reopened.microphone_audio_path, None);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -152,6 +153,7 @@ fn update_with_different_id_leaves_session_unchanged() {
         title: "Changed title".into(),
         context: "Changed context".into(),
         attendees: vec!["Changed attendee".into()],
+        folder: "Changed folder".into(),
         original_notes: "Changed notes".into(),
     });
 

@@ -7,6 +7,7 @@ export type Session = {
   endedAt: string | null;
   context: string;
   attendees: string[];
+  folder: string;
   originalNotes: string;
   transcript: string | null;
   enrichedNotes: string | null;
@@ -20,7 +21,7 @@ export type Bootstrap = { sessions: Session[]; hasApiKey: boolean };
 export type CreateSessionInput = Pick<Session, 'title' | 'context' | 'attendees'>;
 export type UpdateSessionInput = Pick<
   Session,
-  'id' | 'title' | 'context' | 'attendees' | 'originalNotes'
+  'id' | 'title' | 'context' | 'attendees' | 'folder' | 'originalNotes'
 >;
 
 export type RecordingInfo = { sessionId: string; startedAt: string };

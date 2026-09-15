@@ -684,6 +684,7 @@ mod tests {
             title: "Weekly review".into(),
             context: String::new(),
             attendees: Vec::new(),
+            folder: String::new(),
             original_notes: "rent roll".into(),
         }
     }

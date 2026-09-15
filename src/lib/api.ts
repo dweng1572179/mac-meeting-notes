@@ -16,6 +16,7 @@ const basePreviewSession: Session = {
   endedAt: '2026-09-12T18:14:00.000Z',
   context: '[SIMULATION] Initial acquisition review for a regional distribution property.',
   attendees: ['Alex Morgan', 'Jordan Lee', 'Sam Rivera'],
+  folder: 'Acquisitions',
   originalNotes:
     '[SIMULATION]\n\nConfirm tenant rollover exposure and request the latest roof inspection. Underwrite the south bay at market rent.',
   transcript: null,
@@ -82,6 +83,7 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
       endedAt: null,
       context: input.context,
       attendees: input.attendees,
+      folder: '',
       originalNotes: '',
       enrichedNotes: null,
       status: 'draft'
