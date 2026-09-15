@@ -1,6 +1,6 @@
 [package]
 name = "meeting-notes"
-version = "0.2.0"
+version = "0.2.1"
 description = "Meeting Notes"
 authors = ["Darryl Weng"]
 edition = "2021"
