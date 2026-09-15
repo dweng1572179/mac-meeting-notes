@@ -190,15 +190,18 @@ impl SessionStore {
                 .as_deref()
                 .map(|path| self.validate_microphone_audio_path(id, path)),
         ];
+        let mut removed_audio = false;
         for audio_path in audio_paths.into_iter().flatten() {
             let audio_path = audio_path?;
             match fs::remove_file(audio_path) {
-                Ok(()) => {}
+                Ok(()) => removed_audio = true,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(io_error(error)),
             }
         }
-        sync_directory(&self.root.join("audio"))?;
+        if removed_audio {
+            sync_directory(&self.root.join("audio"))?;
+        }
         fs::remove_file(tombstone_path).map_err(io_error)?;
         let _ = sync_directory(&self.sessions_dir()?);
         Ok(())

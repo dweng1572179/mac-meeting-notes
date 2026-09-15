@@ -239,6 +239,26 @@ fn delete_removes_session_and_its_contained_audio() {
 }
 
 #[test]
+fn delete_without_audio_removes_its_tombstone() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let session = Session::new(CreateSessionInput {
+        title: "Meeting".into(),
+        context: String::new(),
+        attendees: Vec::new(),
+    });
+    store.save(&session).unwrap();
+
+    store.delete(&session.id).unwrap();
+
+    assert!(!root
+        .join("sessions")
+        .join(format!("{}.json.deleting", session.id))
+        .exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn save_rejects_microphone_audio_that_belongs_to_another_session() {
     let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
     let audio_dir = root.join("audio");
