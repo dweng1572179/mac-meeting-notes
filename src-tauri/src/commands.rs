@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::{
     domain::{
         transition_to_failed, transition_to_processing, AppError, AppResult, CreateSessionInput,
-        Session, SessionStatus, UpdateSessionInput,
+        MeetingAnswer, Session, SessionStatus, UpdateSessionInput,
     },
     openai::{sections_to_markdown, OpenAiClient},
     recorder::{Recorder, RecordingFiles, RecordingInfo},
@@ -19,6 +19,7 @@ use crate::{
 };
 
 const SESSION_UPDATED: &str = "session-updated";
+const QUESTION_SESSION_LIMIT: usize = 20;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,6 +208,58 @@ pub async fn save_api_key(state: State<'_, AppState>, key: String) -> AppResult<
 #[tauri::command]
 pub fn has_api_key() -> AppResult<bool> {
     ApiKeyStore::exists()
+}
+
+#[tauri::command]
+pub async fn ask_meetings(
+    state: State<'_, AppState>,
+    folder: Option<String>,
+    question: String,
+) -> AppResult<MeetingAnswer> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err(AppError::new("invalid_question", "Enter a question"));
+    }
+    let sessions = {
+        let _guard = lock_sessions(&state)?;
+        eligible_meetings(state.store.list()?, folder.as_deref())
+    };
+    if sessions.is_empty() {
+        return Err(AppError::new(
+            "no_meeting_sources",
+            "No completed meetings with source material are available here yet",
+        ));
+    }
+    let api_key = ApiKeyStore::load()?
+        .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
+    state
+        .openai
+        .ask_meetings(&sessions, question, &api_key)
+        .await
+}
+
+fn eligible_meetings(sessions: Vec<Session>, folder: Option<&str>) -> Vec<Session> {
+    sessions
+        .into_iter()
+        .filter(|session| {
+            session.status == SessionStatus::Complete
+                && folder.is_none_or(|folder| session.folder == folder)
+                && has_meeting_material(session)
+        })
+        // ponytail: recent bounded context avoids a retrieval/database layer; add local retrieval when real libraries outgrow 20 meetings.
+        .take(QUESTION_SESSION_LIMIT)
+        .collect()
+}
+
+fn has_meeting_material(session: &Session) -> bool {
+    [
+        session.context.as_str(),
+        session.original_notes.as_str(),
+        session.transcript.as_deref().unwrap_or_default(),
+        session.enriched_notes.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .any(|text| !text.trim().is_empty())
 }
 
 pub fn setup(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error::Error>> {
@@ -759,6 +812,34 @@ mod tests {
         assert!(!system_path.exists());
         assert!(!microphone_path.exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_question_sources_are_completed_material_from_that_folder() {
+        let mut included = Session::new(CreateSessionInput {
+            title: "Included".into(),
+            context: String::new(),
+            attendees: Vec::new(),
+        });
+        included.folder = "Acquisitions".into();
+        included.status = SessionStatus::Complete;
+        included.transcript = Some("source".into());
+        let mut wrong_folder = included.clone();
+        wrong_folder.id = "wrong-folder".into();
+        wrong_folder.folder = "Leasing".into();
+        let mut draft = included.clone();
+        draft.id = "draft".into();
+        draft.status = SessionStatus::Draft;
+        let mut empty = included.clone();
+        empty.id = "empty".into();
+        empty.transcript = None;
+
+        let eligible = super::eligible_meetings(
+            vec![included.clone(), wrong_folder, draft, empty],
+            Some("Acquisitions"),
+        );
+
+        assert_eq!(eligible, vec![included]);
     }
 
     #[test]

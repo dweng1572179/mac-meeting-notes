@@ -127,6 +127,99 @@ fn transcription_upload_identifies_m4a_as_audio_mp4() {
         .contains("content-type: audio/mp4\r\n"));
 }
 
+#[test]
+fn folder_question_posts_sources_and_rejects_invented_citations() {
+    let mut first = session();
+    first.id = "first-meeting".into();
+    first.title = "Harbor review".into();
+    first.transcript = Some("Exact source sentence about the rent roll.".into());
+    let mut second = session();
+    second.id = "second-meeting".into();
+    second.title = "Leasing review".into();
+    second.transcript = Some("SECOND_SOURCE_TOKEN_916".into());
+    let response = json_response(
+        200,
+        &json!({
+            "status": "completed",
+            "output": [{
+                "content": [{
+                    "type": "output_text",
+                    "text": serde_json::json!({
+                        "answer": "The rent roll still needs review.",
+                        "citations": [
+                            {
+                                "session_id": "first-meeting",
+                                "excerpt": "Exact source sentence about the rent roll."
+                            },
+                            {
+                                "session_id": "made-up-meeting",
+                                "excerpt": "Invented evidence"
+                            }
+                        ]
+                    }).to_string()
+                }]
+            }]
+        })
+        .to_string(),
+    );
+    let (base_url, requests) = local_server(response);
+    let client = OpenAiClient::with_base_url(base_url);
+
+    let answer = tauri::async_runtime::block_on(client.ask_meetings(
+        &[first, second],
+        "What is outstanding?",
+        "test-key",
+    ))
+    .unwrap();
+    let request = requests.recv().unwrap();
+    let payload: Value = serde_json::from_str(&request.body).unwrap();
+    let input = payload["input"][0]["content"][0]["text"].as_str().unwrap();
+
+    assert_eq!(payload["model"], "gpt-6-astra");
+    assert_eq!(payload["store"], false);
+    assert!(input.contains("first-meeting"));
+    assert!(input.contains("SECOND_SOURCE_TOKEN_916"));
+    assert_eq!(answer.answer, "The rent roll still needs review.");
+    assert_eq!(answer.citations.len(), 1);
+    assert_eq!(answer.citations[0].session_id, "first-meeting");
+    assert_eq!(answer.citations[0].title, "Harbor review");
+}
+
+#[test]
+fn folder_question_rejects_an_answer_with_only_invented_citations() {
+    let mut source = session();
+    source.id = "real-meeting".into();
+    let response = json_response(
+        200,
+        &json!({
+            "status": "completed",
+            "output": [{
+                "content": [{
+                    "type": "output_text",
+                    "text": serde_json::json!({
+                        "answer": "Unsupported claim.",
+                        "citations": [{
+                            "session_id": "made-up-meeting",
+                            "excerpt": "Invented evidence"
+                        }]
+                    }).to_string()
+                }]
+            }]
+        })
+        .to_string(),
+    );
+    let (base_url, _requests) = local_server(response);
+
+    let error = tauri::async_runtime::block_on(OpenAiClient::with_base_url(base_url).ask_meetings(
+        &[source],
+        "What happened?",
+        "test-key",
+    ))
+    .unwrap_err();
+
+    assert_eq!(error.code, "unverified_answer");
+}
+
 fn session() -> Session {
     let mut session = Session::new(CreateSessionInput {
         title: "[SIMULATION] Harbor Office 73".into(),

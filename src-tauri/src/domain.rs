@@ -58,6 +58,20 @@ pub struct AppError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingCitation {
+    pub session_id: String,
+    pub title: String,
+    pub excerpt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeetingAnswer {
+    pub answer: String,
+    pub citations: Vec<MeetingCitation>,
+}
+
 pub type AppResult<T> = Result<T, AppError>;
 
 impl AppError {

@@ -4,7 +4,7 @@ use reqwest::{multipart, Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::domain::{AppError, AppResult, Session};
+use crate::domain::{AppError, AppResult, MeetingAnswer, MeetingCitation, Session};
 
 const API_BASE: &str = "https://api.openai.com/v1";
 const ENRICHMENT_MODEL: &str = "gpt-6-astra";
@@ -20,6 +20,18 @@ pub struct EnrichedSections {
     pub key_points: Vec<String>,
     pub decisions: Vec<String>,
     pub action_items: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMeetingAnswer {
+    answer: String,
+    citations: Vec<RawMeetingCitation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMeetingCitation {
+    session_id: String,
+    excerpt: String,
 }
 
 impl OpenAiClient {
@@ -100,25 +112,36 @@ impl OpenAiClient {
             .json::<Value>()
             .await
             .map_err(|_| AppError::new("openai", "OpenAI returned an invalid response"))?;
-        if response["status"] != "completed" {
-            return Err(AppError::new("openai", "OpenAI response was not completed"));
-        }
-        let text = response["output"]
-            .as_array()
-            .and_then(|output| {
-                output.iter().find_map(|item| {
-                    item["content"].as_array().and_then(|content| {
-                        content.iter().find_map(|part| {
-                            (part["type"] == "output_text")
-                                .then(|| part["text"].as_str())
-                                .flatten()
-                        })
-                    })
-                })
-            })
-            .ok_or_else(|| AppError::new("openai", "OpenAI returned no enrichment content"))?;
+        let text = completed_output_text(&response, "enrichment")?;
         serde_json::from_str(text)
             .map_err(|_| AppError::new("openai", "OpenAI returned invalid enrichment content"))
+    }
+
+    pub async fn ask_meetings(
+        &self,
+        sessions: &[Session],
+        question: &str,
+        api_key: &str,
+    ) -> AppResult<MeetingAnswer> {
+        let response = self
+            .client
+            .post(format!("{}/responses", self.base_url))
+            .timeout(Duration::from_secs(300))
+            .bearer_auth(api_key)
+            .json(&build_meeting_question_request(sessions, question))
+            .send()
+            .await
+            .map_err(openai_request_error)?;
+        ensure_success(response.status())?;
+        let response = response
+            .json::<Value>()
+            .await
+            .map_err(|_| AppError::new("openai", "OpenAI returned an invalid response"))?;
+        let raw: RawMeetingAnswer =
+            serde_json::from_str(completed_output_text(&response, "answer")?).map_err(|_| {
+                AppError::new("openai", "OpenAI returned an invalid meeting answer")
+            })?;
+        validate_meeting_answer(raw, sessions)
     }
 }
 
@@ -171,6 +194,141 @@ pub fn build_enrichment_request(session: &Session) -> Value {
             }
         }
     })
+}
+
+fn build_meeting_question_request(sessions: &[Session], question: &str) -> Value {
+    let sources = sessions
+        .iter()
+        .map(|session| {
+            format!(
+                "SOURCE ID: {}\nTITLE: {}\nDATE: {}\n{}",
+                session.id,
+                session.title,
+                session.started_at,
+                meeting_source_text(session)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n");
+    json!({
+        "model": ENRICHMENT_MODEL,
+        "store": false,
+        "instructions": "Answer only from the supplied meeting sources. Be concise and specific. Cite each factual claim with one or more source records. Each citation excerpt must be an exact contiguous quote from that source. Never invent a meeting ID or excerpt. If the sources do not answer the question, say so plainly and return no citations.",
+        "input": [{
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!("Question: {}\n\nMeeting sources:\n{}", question.trim(), sources),
+            }]
+        }],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "meeting_answer",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["answer", "citations"],
+                    "properties": {
+                        "answer": { "type": "string" },
+                        "citations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["session_id", "excerpt"],
+                                "properties": {
+                                    "session_id": { "type": "string" },
+                                    "excerpt": { "type": "string" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn meeting_source_text(session: &Session) -> String {
+    let source = format!(
+        "Context: {}\nOriginal notes: {}\nTranscript: {}\nEnhanced notes: {}",
+        session.context,
+        session.original_notes,
+        session.transcript.as_deref().unwrap_or_default(),
+        session.enriched_notes.as_deref().unwrap_or_default(),
+    );
+    truncate_utf8(&source, 8_000).to_owned()
+}
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn validate_meeting_answer(
+    raw: RawMeetingAnswer,
+    sessions: &[Session],
+) -> AppResult<MeetingAnswer> {
+    let answer = raw.answer.trim().to_owned();
+    if answer.is_empty() {
+        return Err(AppError::new(
+            "openai",
+            "OpenAI returned an empty meeting answer",
+        ));
+    }
+    let had_citations = !raw.citations.is_empty();
+    let citations = raw
+        .citations
+        .into_iter()
+        .filter_map(|citation| {
+            let session = sessions
+                .iter()
+                .find(|session| session.id == citation.session_id)?;
+            let excerpt = citation.excerpt.trim();
+            (!excerpt.is_empty() && meeting_source_text(session).contains(excerpt)).then(|| {
+                MeetingCitation {
+                    session_id: session.id.clone(),
+                    title: session.title.clone(),
+                    excerpt: excerpt.to_owned(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    if had_citations && citations.is_empty() {
+        return Err(AppError::new(
+            "unverified_answer",
+            "OpenAI returned an answer without a verifiable meeting source",
+        ));
+    }
+    Ok(MeetingAnswer { answer, citations })
+}
+
+fn completed_output_text<'a>(response: &'a Value, kind: &str) -> AppResult<&'a str> {
+    if response["status"] != "completed" {
+        return Err(AppError::new("openai", "OpenAI response was not completed"));
+    }
+    response["output"]
+        .as_array()
+        .and_then(|output| {
+            output.iter().find_map(|item| {
+                item["content"].as_array().and_then(|content| {
+                    content.iter().find_map(|part| {
+                        (part["type"] == "output_text")
+                            .then(|| part["text"].as_str())
+                            .flatten()
+                    })
+                })
+            })
+        })
+        .ok_or_else(|| AppError::new("openai", format!("OpenAI returned no {kind} content")))
 }
 
 pub fn sections_to_markdown(sections: EnrichedSections) -> String {

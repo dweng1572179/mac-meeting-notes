@@ -25,3 +25,6 @@ export type UpdateSessionInput = Pick<
 >;
 
 export type RecordingInfo = { sessionId: string; startedAt: string };
+
+export type MeetingCitation = { sessionId: string; title: string; excerpt: string };
+export type MeetingAnswer = { answer: string; citations: MeetingCitation[] };

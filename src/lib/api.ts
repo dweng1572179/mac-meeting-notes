@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type {
   Bootstrap,
   CreateSessionInput,
+  MeetingAnswer,
   RecordingInfo,
   Session,
   UpdateSessionInput
@@ -171,6 +172,24 @@ export async function saveApiKey(key: string): Promise<void> {
 export async function hasApiKey(): Promise<boolean> {
   if (!isNative()) return false;
   return invoke<boolean>('has_api_key');
+}
+
+export async function askMeetings(folder: string | null, question: string): Promise<MeetingAnswer> {
+  if (!isNative()) {
+    await previewDelay();
+    const source = previewSession ?? previewState();
+    return {
+      answer: '[SIMULATION] The team decided to advance to detailed underwriting while the rent roll and roof report remain open.',
+      citations: [
+        {
+          sessionId: source.id,
+          title: source.title,
+          excerpt: 'Advance to a detailed underwriting review.'
+        }
+      ]
+    };
+  }
+  return invoke<MeetingAnswer>('ask_meetings', { folder, question });
 }
 
 export function disposeAsyncListener(registration: Promise<UnlistenFn>): UnlistenFn {

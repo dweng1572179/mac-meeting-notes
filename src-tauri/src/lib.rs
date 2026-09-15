@@ -24,6 +24,7 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::delete_transcript,
             commands::save_api_key,
             commands::has_api_key,
+            commands::ask_meetings,
         ]);
 
     #[cfg(target_os = "macos")]
