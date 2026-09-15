@@ -109,6 +109,7 @@ impl Session {
 pub fn transition_to_processing(
     mut session: Session,
     audio_path: impl Into<String>,
+    microphone_audio_path: Option<String>,
 ) -> AppResult<Session> {
     if session.status != SessionStatus::Recording {
         return Err(AppError::new(
@@ -118,6 +119,7 @@ pub fn transition_to_processing(
     }
     session.ended_at = Some(Utc::now().to_rfc3339_opts(SecondsFormat::AutoSi, true));
     session.audio_path = Some(audio_path.into());
+    session.microphone_audio_path = microphone_audio_path;
     session.status = SessionStatus::Processing;
     session.error = None;
     Ok(session)

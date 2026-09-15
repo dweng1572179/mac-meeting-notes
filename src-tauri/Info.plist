@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>NSAudioCaptureUsageDescription</key>
-  <string>Meeting Notes records computer audio only while you run a meeting.</string>
+  <string>Meeting Notes records computer audio while you run a meeting so the conversation can enrich your notes.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Meeting Notes records your microphone while you run a meeting so both sides of the conversation are captured.</string>
 </dict>
 </plist>

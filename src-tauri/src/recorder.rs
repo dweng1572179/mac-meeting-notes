@@ -14,6 +14,12 @@ pub struct RecordingInfo {
     pub started_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordingFiles {
+    pub system: PathBuf,
+    pub microphone: PathBuf,
+}
+
 #[derive(Default)]
 struct RecordingSlot {
     session_id: Option<String>,
@@ -57,7 +63,12 @@ impl Recorder {
         }
     }
 
-    pub fn start(&self, session_id: &str, path: &Path) -> AppResult<RecordingInfo> {
+    pub fn start(
+        &self,
+        session_id: &str,
+        system_path: &Path,
+        microphone_path: &Path,
+    ) -> AppResult<RecordingInfo> {
         if session_id.is_empty() {
             return Err(AppError::new(
                 "invalid_session_id",
@@ -69,7 +80,7 @@ impl Recorder {
         slot.reserve(session_id)?;
 
         #[cfg(target_os = "macos")]
-        match native::NativeRecording::start(path) {
+        match native::NativeRecording::start(system_path, microphone_path) {
             Ok(recording) => slot.recording = Some(recording),
             Err(error) => {
                 slot.session_id = None;
@@ -79,7 +90,7 @@ impl Recorder {
 
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = path;
+            let _ = (system_path, microphone_path);
             slot.session_id = None;
             return Err(AppError::new(
                 "audio_capture_unsupported",
@@ -93,7 +104,7 @@ impl Recorder {
         })
     }
 
-    pub fn stop(&self, session_id: &str) -> AppResult<PathBuf> {
+    pub fn stop(&self, session_id: &str) -> AppResult<RecordingFiles> {
         let mut slot = self.lock_slot()?;
         if slot.session_id.as_deref() != Some(session_id) {
             return Err(AppError::new(
@@ -164,23 +175,28 @@ mod native {
         kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceNameKey,
         kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
         kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyStreams,
-        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice,
         kAudioHardwarePropertyTranslatePIDToProcessObject, kAudioObjectPropertyElementMain,
-        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
-        kAudioSubTapUIDKey, kAudioTapPropertyFormat, AudioDeviceCreateIOProcID,
-        AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
-        AudioHardwareCreateAggregateDevice, AudioHardwareCreateProcessTap,
-        AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap,
-        AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
-        AudioObjectPropertyAddress, CATapDescription, CATapMuteBehavior,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
+        kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+        kAudioStreamPropertyVirtualFormat, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
+        AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID,
+        AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
+        AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
+        AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
+        AudioObjectID, AudioObjectPropertyAddress, CATapDescription, CATapMuteBehavior,
     };
     use objc2_core_audio_types::{
-        kAudioFormatMPEG4AAC, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp,
+        kAudioFormatLinearPCM, kAudioFormatMPEG4AAC, AudioBufferList, AudioStreamBasicDescription,
+        AudioTimeStamp,
     };
     use objc2_core_foundation::{CFDictionary, CFRetained, CFString, CFURL};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
 
-    use crate::domain::{AppError, AppResult};
+    use crate::{
+        domain::{AppError, AppResult},
+        recorder::RecordingFiles,
+    };
 
     const NO_ERR: i32 = 0;
     const AAC_BIT_RATE: u32 = 48_000;
@@ -188,12 +204,18 @@ mod native {
 
     pub(super) struct NativeRecording {
         path: PathBuf,
+        microphone_path: PathBuf,
         tap_id: AudioObjectID,
         aggregate_id: AudioObjectID,
         io_proc_id: AudioDeviceIOProcID,
         file: ExtAudioFileRef,
         callback: Option<Box<CallbackState>>,
         started: bool,
+        microphone_device_id: AudioObjectID,
+        microphone_io_proc_id: AudioDeviceIOProcID,
+        microphone_file: ExtAudioFileRef,
+        microphone_callback: Option<Box<CallbackState>>,
+        microphone_started: bool,
     }
 
     // SAFETY: ownership moves only under Recorder's mutex. Core Audio accesses CallbackState
@@ -262,38 +284,47 @@ mod native {
     }
 
     impl NativeRecording {
-        pub(super) fn start(path: &Path) -> AppResult<Self> {
+        pub(super) fn start(path: &Path, microphone_path: &Path) -> AppResult<Self> {
             let mut recording = Self {
                 path: path.to_owned(),
+                microphone_path: microphone_path.to_owned(),
                 tap_id: 0,
                 aggregate_id: 0,
                 io_proc_id: None,
                 file: ptr::null_mut(),
                 callback: None,
                 started: false,
+                microphone_device_id: 0,
+                microphone_io_proc_id: None,
+                microphone_file: ptr::null_mut(),
+                microphone_callback: None,
+                microphone_started: false,
             };
 
             // SAFETY: setup owns every returned resource and records it immediately so any later
             // error can run the same complete reverse-order teardown as stop.
             unsafe {
-                if let Err(error) = recording.setup(path) {
+                if let Err(error) = recording.setup(path, microphone_path) {
                     return Err(recording.fail(error));
                 }
             }
             Ok(recording)
         }
 
-        pub(super) fn stop(mut self) -> AppResult<PathBuf> {
+        pub(super) fn stop(mut self) -> AppResult<RecordingFiles> {
             // SAFETY: this value exclusively owns the registered IOProc and all handles below.
             let errors = unsafe { self.cleanup() };
             if errors.is_empty() {
-                Ok(self.path.clone())
+                Ok(RecordingFiles {
+                    system: self.path.clone(),
+                    microphone: self.microphone_path.clone(),
+                })
             } else {
                 Err(combine_errors(errors))
             }
         }
 
-        unsafe fn setup(&mut self, path: &Path) -> AppResult<()> {
+        unsafe fn setup(&mut self, path: &Path, microphone_path: &Path) -> AppResult<()> {
             let (device_uid, stream_index) = default_output_stream()?;
             let process_id = process_audio_object()?;
             let processes = object_ids_to_nsarray(&[process_id]);
@@ -368,6 +399,52 @@ mod native {
                 AudioDeviceStart(self.aggregate_id, self.io_proc_id),
             )?;
             self.started = true;
+            self.setup_microphone(microphone_path)
+                .map_err(microphone_error)?;
+            Ok(())
+        }
+
+        unsafe fn setup_microphone(&mut self, path: &Path) -> AppResult<()> {
+            let (device, input_format) = default_input_stream()?;
+            self.microphone_device_id = device;
+            self.microphone_file = create_audio_file(path, &input_format)?;
+            set_client_format(self.microphone_file, &input_format)?;
+            set_bit_rate(self.microphone_file)?;
+            check_status(
+                "ExtAudioFileWriteAsync(microphone prime)",
+                ExtAudioFileWriteAsync(self.microphone_file, 0, ptr::null()),
+            )?;
+
+            self.microphone_callback = Some(Box::new(CallbackState {
+                file: self.microphone_file,
+                bytes_per_frame: input_format.mBytesPerFrame,
+                gate: CallbackGate::default(),
+                write_status: AtomicI32::new(NO_ERR),
+            }));
+            let callback = self
+                .microphone_callback
+                .as_mut()
+                .expect("microphone callback was just set");
+            check_status(
+                "AudioDeviceCreateIOProcID(microphone)",
+                AudioDeviceCreateIOProcID(
+                    self.microphone_device_id,
+                    Some(audio_io_proc),
+                    (&mut **callback as *mut CallbackState).cast(),
+                    NonNull::from(&mut self.microphone_io_proc_id),
+                ),
+            )?;
+            if self.microphone_io_proc_id.is_none() {
+                return Err(AppError::new(
+                    "audio_capture",
+                    "AudioDeviceCreateIOProcID returned an invalid microphone IO proc",
+                ));
+            }
+            check_status(
+                "AudioDeviceStart(microphone)",
+                AudioDeviceStart(self.microphone_device_id, self.microphone_io_proc_id),
+            )?;
+            self.microphone_started = true;
             Ok(())
         }
 
@@ -380,29 +457,25 @@ mod native {
 
         unsafe fn cleanup(&mut self) -> Vec<AppError> {
             let mut errors = Vec::new();
-            if let Some(callback) = &self.callback {
-                callback.gate.disable();
-            }
-
-            if self.started {
-                collect_status(
-                    &mut errors,
-                    "AudioDeviceStop",
-                    AudioDeviceStop(self.aggregate_id, self.io_proc_id),
-                );
-                self.started = false;
-            }
-
-            let mut callback_may_run = false;
-            if self.io_proc_id.is_some() {
-                let status = AudioDeviceDestroyIOProcID(self.aggregate_id, self.io_proc_id);
-                callback_may_run = status != NO_ERR;
-                collect_status(&mut errors, "AudioDeviceDestroyIOProcID", status);
-                self.io_proc_id = None;
-            }
-            if let Some(callback) = &self.callback {
-                callback.gate.wait_for_idle();
-            }
+            cleanup_stream(
+                &mut errors,
+                "microphone",
+                self.microphone_device_id,
+                &mut self.microphone_io_proc_id,
+                &mut self.microphone_started,
+                &mut self.microphone_file,
+                &mut self.microphone_callback,
+            );
+            self.microphone_device_id = 0;
+            cleanup_stream(
+                &mut errors,
+                "system audio",
+                self.aggregate_id,
+                &mut self.io_proc_id,
+                &mut self.started,
+                &mut self.file,
+                &mut self.callback,
+            );
             if self.aggregate_id != 0 {
                 collect_status(
                     &mut errors,
@@ -419,28 +492,63 @@ mod native {
                 );
                 self.tap_id = 0;
             }
-
-            if let Some(callback) = &self.callback {
-                let status = callback.write_status.load(Ordering::Acquire);
-                collect_status(&mut errors, "ExtAudioFileWriteAsync(callback)", status);
-            }
-            if !self.file.is_null() {
-                collect_status(
-                    &mut errors,
-                    "ExtAudioFileDispose",
-                    ExtAudioFileDispose(self.file),
-                );
-                self.file = ptr::null_mut();
-            }
-
-            if callback_may_run {
-                if let Some(callback) = self.callback.take() {
-                    let _ = Box::leak(callback);
-                }
-            } else {
-                self.callback = None;
-            }
             errors
+        }
+    }
+
+    unsafe fn cleanup_stream(
+        errors: &mut Vec<AppError>,
+        label: &str,
+        device_id: AudioObjectID,
+        io_proc_id: &mut AudioDeviceIOProcID,
+        started: &mut bool,
+        file: &mut ExtAudioFileRef,
+        callback: &mut Option<Box<CallbackState>>,
+    ) {
+        if let Some(callback) = callback.as_ref() {
+            callback.gate.disable();
+        }
+        if *started {
+            collect_status(
+                errors,
+                &format!("AudioDeviceStop({label})"),
+                AudioDeviceStop(device_id, *io_proc_id),
+            );
+            *started = false;
+        }
+        let mut callback_may_run = false;
+        if io_proc_id.is_some() {
+            let status = AudioDeviceDestroyIOProcID(device_id, *io_proc_id);
+            callback_may_run = status != NO_ERR;
+            collect_status(
+                errors,
+                &format!("AudioDeviceDestroyIOProcID({label})"),
+                status,
+            );
+            *io_proc_id = None;
+        }
+        if let Some(callback) = callback.as_ref() {
+            callback.gate.wait_for_idle();
+            collect_status(
+                errors,
+                &format!("ExtAudioFileWriteAsync({label} callback)"),
+                callback.write_status.load(Ordering::Acquire),
+            );
+        }
+        if !file.is_null() {
+            collect_status(
+                errors,
+                &format!("ExtAudioFileDispose({label})"),
+                ExtAudioFileDispose(*file),
+            );
+            *file = ptr::null_mut();
+        }
+        if callback_may_run {
+            if let Some(callback) = callback.take() {
+                let _ = Box::leak(callback);
+            }
+        } else {
+            *callback = None;
         }
     }
 
@@ -507,13 +615,73 @@ mod native {
                 "Core Audio returned no default output device",
             ));
         }
+        let streams = device_streams(device, kAudioObjectPropertyScopeOutput, "output")?;
+        if streams.first().copied().unwrap_or(0) == 0 {
+            return Err(AppError::new(
+                "audio_capture",
+                "Default output device returned an invalid output stream",
+            ));
+        }
+        Ok((read_device_uid(device)?, 0))
+    }
 
-        let stream_address =
-            property_address(kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput);
+    fn default_input_stream() -> AppResult<(AudioObjectID, AudioStreamBasicDescription)> {
+        let device = read_scalar::<AudioObjectID>(
+            kAudioObjectSystemObject as AudioObjectID,
+            property_address(
+                kAudioHardwarePropertyDefaultInputDevice,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+            "AudioObjectGetPropertyData(default input device)",
+            None,
+        )?;
+        if device == 0 {
+            return Err(AppError::new(
+                "audio_capture",
+                "Core Audio returned no default microphone",
+            ));
+        }
+        let stream = device_streams(device, kAudioObjectPropertyScopeInput, "input")?
+            .first()
+            .copied()
+            .filter(|stream| *stream != 0)
+            .ok_or_else(|| {
+                AppError::new(
+                    "audio_capture",
+                    "Default microphone returned no input stream",
+                )
+            })?;
+        let format = read_scalar::<AudioStreamBasicDescription>(
+            stream,
+            property_address(
+                kAudioStreamPropertyVirtualFormat,
+                kAudioObjectPropertyScopeGlobal,
+            ),
+            "AudioObjectGetPropertyData(default microphone format)",
+            None,
+        )?;
+        if format.mFormatID != kAudioFormatLinearPCM
+            || format.mChannelsPerFrame == 0
+            || format.mBytesPerFrame == 0
+        {
+            return Err(AppError::new(
+                "audio_capture",
+                "Default microphone did not provide a valid PCM format",
+            ));
+        }
+        Ok((device, format))
+    }
+
+    fn device_streams(
+        device: AudioObjectID,
+        scope: u32,
+        label: &str,
+    ) -> AppResult<Vec<AudioObjectID>> {
+        let stream_address = property_address(kAudioDevicePropertyStreams, scope);
         let mut stream_bytes = 0;
         // SAFETY: address and byte-count output are valid for the duration of the call.
         check_status(
-            "AudioObjectGetPropertyDataSize(default output streams)",
+            &format!("AudioObjectGetPropertyDataSize(default {label} streams)"),
             unsafe {
                 AudioObjectGetPropertyDataSize(
                     device,
@@ -527,13 +695,13 @@ mod native {
         if stream_bytes < size_of::<AudioObjectID>() as u32 {
             return Err(AppError::new(
                 "audio_capture",
-                "Default output device has no output stream",
+                format!("Default {label} device has no {label} stream"),
             ));
         }
         let mut streams = vec![0; stream_bytes as usize / size_of::<AudioObjectID>()];
         // SAFETY: streams has exactly the aligned writable capacity reported by Core Audio.
         check_status(
-            "AudioObjectGetPropertyData(default output streams)",
+            &format!("AudioObjectGetPropertyData(default {label} streams)"),
             unsafe {
                 AudioObjectGetPropertyData(
                     device,
@@ -545,14 +713,7 @@ mod native {
                 )
             },
         )?;
-        if streams.first().copied().unwrap_or(0) == 0 {
-            return Err(AppError::new(
-                "audio_capture",
-                "Default output device returned an invalid output stream",
-            ));
-        }
-
-        Ok((read_device_uid(device)?, 0))
+        Ok(streams)
     }
 
     fn process_audio_object() -> AppResult<AudioObjectID> {
@@ -833,9 +994,17 @@ mod native {
         )
     }
 
-    fn combine_errors(errors: Vec<AppError>) -> AppError {
+    fn microphone_error(error: AppError) -> AppError {
+        AppError::new("microphone_capture", error.message)
+    }
+
+    pub(super) fn combine_errors(errors: Vec<AppError>) -> AppError {
+        let code = errors
+            .first()
+            .map(|error| error.code.clone())
+            .unwrap_or_else(|| "audio_capture".into());
         AppError::new(
-            "audio_capture",
+            code,
             errors
                 .into_iter()
                 .map(|error| error.message)
@@ -898,5 +1067,16 @@ mod tests {
         assert!(!gate.is_idle());
         drop(lease);
         assert!(gate.is_idle());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn microphone_start_failure_keeps_its_error_code() {
+        let error = native::combine_errors(vec![AppError::new(
+            "microphone_capture",
+            "Microphone permission was denied",
+        )]);
+
+        assert_eq!(error.code, "microphone_capture");
     }
 }
