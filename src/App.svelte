@@ -149,12 +149,16 @@
         />
       {/key}
     {:else}
-      <LibraryView
-        {sessions}
-        folder={selectedFolder}
-        onSelect={selectSession}
-        onNewNote={newNote}
-      />
+      {#key selectedFolder}
+        <LibraryView
+          {sessions}
+          {hasApiKey}
+          folder={selectedFolder}
+          onSelect={selectSession}
+          onNewNote={newNote}
+          onOpenSettings={() => (settingsOpen = true)}
+        />
+      {/key}
     {/if}
   </main>
 </div>

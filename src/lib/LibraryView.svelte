@@ -1,20 +1,29 @@
 <script lang="ts">
+  import { askMeetings } from './api';
   import { sessionsForFolder } from './library';
-  import type { Session } from './types';
+  import type { MeetingAnswer, Session } from './types';
 
   let {
     sessions,
     folder,
+    hasApiKey,
     onSelect,
-    onNewNote
+    onNewNote,
+    onOpenSettings
   }: {
     sessions: Session[];
     folder: string | null;
+    hasApiKey: boolean;
     onSelect: (id: string) => void;
     onNewNote: () => void;
+    onOpenSettings: () => void;
   } = $props();
 
   let visibleSessions = $derived(sessionsForFolder(sessions, folder));
+  let question = $state('');
+  let answer = $state<MeetingAnswer | null>(null);
+  let asking = $state(false);
+  let askError = $state('');
 
   const meetingTime = (startedAt: string) =>
     new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(
@@ -25,6 +34,28 @@
     if (session.attendees.length) return session.attendees.join(', ');
     if (session.context.trim()) return session.context.trim();
     return session.status === 'complete' ? 'Meeting notes ready' : 'Draft meeting';
+  }
+
+  async function ask(event: SubmitEvent) {
+    event.preventDefault();
+    if (!question.trim()) return;
+    if (!hasApiKey) {
+      onOpenSettings();
+      return;
+    }
+    asking = true;
+    askError = '';
+    answer = null;
+    try {
+      answer = await askMeetings(folder, question.trim());
+    } catch (error) {
+      askError =
+        error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+          ? error.message
+          : 'The meeting answer could not be created.';
+    } finally {
+      asking = false;
+    }
   }
 </script>
 
@@ -78,8 +109,39 @@
       <h2 id="ask-title">Ask {folder ? `about ${folder}` : 'your meetings'}</h2>
       <span>Answers will cite the exact meetings they came from.</span>
     </div>
-    <div class="ask-placeholder" aria-hidden="true">
-      <span>“What decisions are still waiting on follow-up?”</span>
+    <form class="ask-form" onsubmit={ask}>
+      <label for="meeting-question">Question</label>
+      <textarea
+        id="meeting-question"
+        bind:value={question}
+        rows="3"
+        placeholder="What decisions are still waiting on follow-up?"
+      ></textarea>
+      <button type="submit" disabled={asking || !question.trim()}>
+        {asking ? 'Reading meetings…' : hasApiKey ? 'Ask meetings' : 'Add OpenAI key'}
+      </button>
+    </form>
+
+    <div class="ask-response" aria-live="polite">
+      {#if askError}
+        <p class="ask-error" role="alert">{askError}</p>
+      {:else if answer}
+        <p class="answer-copy">{answer.answer}</p>
+        {#if answer.citations.length}
+          <ol class="citation-list" aria-label="Meeting sources">
+            {#each answer.citations as citation}
+              <li>
+                <button type="button" onclick={() => onSelect(citation.sessionId)}>
+                  <strong>{citation.title}</strong>
+                  <span>“{citation.excerpt}”</span>
+                </button>
+              </li>
+            {/each}
+          </ol>
+        {/if}
+      {:else}
+        <p class="ask-hint">Ask across the {folder ? 'meetings in this folder' : 'latest 20 completed meetings'}.</p>
+      {/if}
     </div>
   </aside>
 </section>

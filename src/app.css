@@ -317,22 +317,76 @@ main {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  justify-content: space-between;
   padding: 14px 0 0 32px;
 }
 
 .ask-panel h2 { margin: 0; font-size: 24px; font-weight: 680; letter-spacing: -0.025em; line-height: 1.15; }
 
-.ask-placeholder {
-  margin-top: 42px;
-  padding: 14px;
+.ask-form { margin-top: 38px; }
+.ask-form label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--muted-text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.ask-form textarea {
+  display: block;
+  width: 100%;
+  min-height: 84px;
+  padding: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  color: var(--muted-text);
+  resize: vertical;
+  color: var(--ink);
   background: rgba(255, 255, 255, 0.34);
+  font: inherit;
   font-size: 12px;
   line-height: 1.5;
 }
+
+.ask-form textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 48%, transparent); outline-offset: 1px; }
+.ask-form textarea::placeholder { color: #929188; }
+
+.ask-form button {
+  width: 100%;
+  min-height: 34px;
+  margin-top: 9px;
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  background: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ask-form button:disabled { cursor: default; opacity: 0.48; }
+.ask-response { margin-top: 26px; }
+.ask-hint,
+.ask-error,
+.answer-copy { margin: 0; font-size: 12px; line-height: 1.6; }
+.ask-hint { color: var(--muted-text); }
+.ask-error { color: var(--danger); }
+.answer-copy { color: #4c4b44; }
+
+.citation-list { padding: 0; margin: 16px 0 0; list-style: none; }
+.citation-list li + li { margin-top: 8px; }
+.citation-list button {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.34);
+  text-align: left;
+  cursor: pointer;
+}
+
+.citation-list button:hover { background: rgba(255, 255, 255, 0.72); }
+.citation-list strong { display: block; font-size: 11px; font-weight: 680; }
+.citation-list span { display: block; margin-top: 5px; color: var(--muted-text); font-size: 11px; line-height: 1.45; }
 
 .meeting-document { width: min(100%, 820px); margin: 0 auto; }
 .document-header { max-width: 720px; }
