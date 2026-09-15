@@ -1,6 +1,6 @@
 use meeting_notes_lib::commands::{
-    interrupted_recording, needs_transcription, recover_interrupted, recover_interrupted_sessions,
-    retry_start, stop_recording_in_store_on_exit, transcript_deleted,
+    combine_transcripts, interrupted_recording, needs_transcription, recover_interrupted,
+    recover_interrupted_sessions, retry_start, stop_recording_in_store_on_exit, transcript_deleted,
 };
 use meeting_notes_lib::domain::{
     transition_to_failed, transition_to_processing, AppError, CreateSessionInput, Session,
@@ -81,6 +81,29 @@ fn retry_with_transcript_skips_transcription() {
     assert_eq!(retry.status, SessionStatus::Processing);
     assert_eq!(retry.transcript.as_deref(), Some("spoken transcript"));
     assert!(!needs_transcription(&retry));
+}
+
+#[test]
+fn blank_transcript_is_retried() {
+    let mut retry = failed_with_transcript();
+    retry.transcript = Some(" \n ".into());
+
+    assert!(needs_transcription(&retry));
+}
+
+#[test]
+fn system_and_microphone_transcripts_keep_source_labels() {
+    let transcript = combine_transcripts("Remote words", "My words").unwrap();
+
+    assert_eq!(transcript, "Meeting audio:\nRemote words\n\nYou:\nMy words");
+}
+
+#[test]
+fn silent_recording_is_not_a_successful_transcript() {
+    let error = combine_transcripts(" \n", "\t").unwrap_err();
+
+    assert_eq!(error.code, "no_speech");
+    assert!(error.message.contains("audio was kept"));
 }
 
 #[test]

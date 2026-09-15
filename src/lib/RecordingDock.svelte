@@ -2,6 +2,22 @@
   export function elapsedRecordingSeconds(startedAt: number, now: number) {
     return Math.max(0, Math.floor((now - startedAt) / 1000));
   }
+
+  export function captureErrorMessage(error: unknown) {
+    const detail =
+      error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : 'The action could not be completed.';
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
+    if (code === 'microphone_capture') {
+      return `${detail} Open System Settings → Privacy & Security → Microphone, enable Meeting Notes, then try again.`;
+    }
+    return code === 'audio_capture' || detail.includes('OSStatus')
+      ? `${detail} Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Meeting Notes, then try again.`
+      : detail;
+  }
 </script>
 
 <script lang="ts">
@@ -69,19 +85,6 @@
       : `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
   };
 
-  function message(error: unknown) {
-    const detail =
-      error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
-        ? error.message
-        : error instanceof Error
-          ? error.message
-          : 'The action could not be completed.';
-    const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
-    return code === 'audio_capture' || detail.includes('OSStatus')
-      ? `${detail} Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Meeting Notes, then try again.`
-      : detail;
-  }
-
   async function start() {
     pending = 'start';
     actionError = '';
@@ -98,7 +101,7 @@
       onRecordingStarted(recording.sessionId, baseline);
       onSessionChange({ ...session, status: 'recording', error: null });
     } catch (error) {
-      actionError = message(error);
+      actionError = captureErrorMessage(error);
     } finally {
       pending = null;
     }
@@ -111,7 +114,7 @@
       await onFlush();
       onSessionChange(await stopRecording(session.id));
     } catch (error) {
-      actionError = message(error);
+      actionError = captureErrorMessage(error);
     } finally {
       pending = null;
     }
@@ -124,7 +127,7 @@
       await onFlush();
       onSessionChange(await retryProcessing(session.id));
     } catch (error) {
-      actionError = message(error);
+      actionError = captureErrorMessage(error);
     } finally {
       pending = null;
     }
@@ -135,7 +138,7 @@
   <div class="recording-dock live" aria-label="Meeting recording in progress">
     <span class="sr-only" role="status">Recording started.</span>
     <span class="recording-dot" aria-hidden="true"></span>
-    <span>Recording</span>
+    <span>Microphone + computer</span>
     <time aria-label={`Elapsed recording time ${elapsedLabel()}`}>{elapsedLabel()}</time>
     <button type="button" disabled={pending !== null} onclick={stop}>
       {pending === 'stop' ? 'Stopping…' : 'Stop'}
@@ -147,7 +150,7 @@
     <span>Processing meeting</span>
     <span class="processing-line" aria-hidden="true"></span>
   </div>
-{:else if session.status === 'failed' && (session.audioPath !== null || session.transcript !== null)}
+{:else if session.status === 'failed' && (session.audioPath !== null || session.microphoneAudioPath !== null || session.transcript !== null)}
   <div class="failure-dock" role="alert">
     <p>{session.error?.message ?? 'Processing could not finish.'}</p>
     <button type="button" disabled={pending !== null} onclick={retry}>

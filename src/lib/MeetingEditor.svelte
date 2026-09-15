@@ -302,7 +302,7 @@
     <p class="settings-copy">
       {#if confirmation === 'transcript'}
         The transcript and enhanced notes will be permanently removed. Your original notes and any retained audio will stay.
-      {:else if session.audioPath !== null}
+      {:else if session.audioPath !== null || session.microphoneAudioPath !== null}
         This meeting, its notes, and its retained audio recording will be permanently removed.
       {:else}
         This meeting and its notes will be permanently removed. There is no retained audio recording to remove.

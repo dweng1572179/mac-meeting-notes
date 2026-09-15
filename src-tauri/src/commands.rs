@@ -262,9 +262,20 @@ async fn process_session(app: &AppHandle, id: &str) -> AppResult<()> {
         .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
 
     if needs_transcription(&session) {
-        let path = retained_audio_path(&state, &session)?
-            .ok_or_else(|| AppError::new("audio_file", "Recorded audio is unavailable"))?;
-        let transcript = state.openai.transcribe(&path, &api_key).await?;
+        let system_path = retained_audio_path(&state, &session)?;
+        let microphone_path = retained_microphone_audio_path(&state, &session)?;
+        if system_path.is_none() && microphone_path.is_none() {
+            return Err(AppError::new("audio_file", "Recorded audio is unavailable"));
+        }
+        let system_transcript = match system_path {
+            Some(path) => state.openai.transcribe(&path, &api_key).await?,
+            None => String::new(),
+        };
+        let microphone_transcript = match microphone_path {
+            Some(path) => state.openai.transcribe(&path, &api_key).await?,
+            None => String::new(),
+        };
+        let transcript = combine_transcripts(&system_transcript, &microphone_transcript)?;
         persist_transcript(&state, id, transcript)?;
     }
 
@@ -333,7 +344,28 @@ pub fn retry_start(mut session: Session) -> AppResult<Session> {
 }
 
 pub fn needs_transcription(session: &Session) -> bool {
-    session.transcript.is_none()
+    session
+        .transcript
+        .as_deref()
+        .is_none_or(|transcript| transcript.trim().is_empty())
+}
+
+pub fn combine_transcripts(system: &str, microphone: &str) -> AppResult<String> {
+    let mut sources = Vec::new();
+    if !system.trim().is_empty() {
+        sources.push(format!("Meeting audio:\n{}", system.trim()));
+    }
+    if !microphone.trim().is_empty() {
+        sources.push(format!("You:\n{}", microphone.trim()));
+    }
+    if sources.is_empty() {
+        Err(AppError::new(
+            "no_speech",
+            "No speech was detected. Your audio was kept so you can retry.",
+        ))
+    } else {
+        Ok(sources.join("\n\n"))
+    }
 }
 
 fn delete_session_state(state: &AppState, id: &str) -> AppResult<()> {
@@ -384,13 +416,16 @@ fn persist_transcript(state: &AppState, id: &str, transcript: String) -> AppResu
 fn remove_retained_audio(state: &AppState, id: &str) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
     let mut session = state.store.get(id)?;
-    if let Some(path) = retained_audio_path(state, &session)? {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(storage_error(error)),
+    let retained = [
+        retained_audio_path(state, &session)?,
+        retained_microphone_audio_path(state, &session)?,
+    ];
+    if retained.iter().any(Option::is_some) {
+        for path in retained.into_iter().flatten() {
+            remove_audio_file(path)?;
         }
         session.audio_path = None;
+        session.microphone_audio_path = None;
         state.store.save(&session)?;
     }
     Ok(session)
@@ -470,6 +505,29 @@ fn retained_audio_path(state: &AppState, session: &Session) -> AppResult<Option<
         .as_deref()
         .map(|saved| state.store.validate_audio_path(&session.id, saved))
         .transpose()
+}
+
+fn retained_microphone_audio_path(
+    state: &AppState,
+    session: &Session,
+) -> AppResult<Option<PathBuf>> {
+    session
+        .microphone_audio_path
+        .as_deref()
+        .map(|saved| {
+            state
+                .store
+                .validate_microphone_audio_path(&session.id, saved)
+        })
+        .transpose()
+}
+
+fn remove_audio_file(path: PathBuf) -> AppResult<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage_error(error)),
+    }
 }
 
 fn invalid_status(message: &str) -> AppError {
@@ -676,6 +734,30 @@ mod tests {
         assert_eq!(retry.original_notes, "rent roll");
         assert_eq!(retry.audio_path, session.audio_path);
         assert_eq!(audio, "retryable audio");
+    }
+
+    #[test]
+    fn successful_transcription_cleanup_removes_both_audio_files() {
+        let (state, root, id) = state(SessionStatus::Processing);
+        let audio_dir = root.join("audio");
+        fs::create_dir(&audio_dir).unwrap();
+        let system_path = audio_dir.join(format!("{id}.m4a"));
+        let microphone_path = audio_dir.join(format!("{id}-mic.m4a"));
+        fs::write(&system_path, "system audio").unwrap();
+        fs::write(&microphone_path, "microphone audio").unwrap();
+        let mut session = state.store.get(&id).unwrap();
+        session.audio_path = Some(system_path.to_string_lossy().into_owned());
+        session.microphone_audio_path = Some(microphone_path.to_string_lossy().into_owned());
+        session.transcript = Some("Meeting audio:\nremote\n\nYou:\nlocal".into());
+        state.store.save(&session).unwrap();
+
+        let cleaned = super::remove_retained_audio(&state, &id).unwrap();
+
+        assert_eq!(cleaned.audio_path, None);
+        assert_eq!(cleaned.microphone_audio_path, None);
+        assert!(!system_path.exists());
+        assert!(!microphone_path.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
