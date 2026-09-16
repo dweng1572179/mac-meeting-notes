@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v0.2.4']
+    tags: ['v0.2.5']
 
 permissions:
   contents: write
@@ -24,13 +24,16 @@ jobs:
       - name: Verify packaged app signature
         run: |
           mount_dir=$(mktemp -d)
-          trap 'hdiutil detach "$mount_dir"' EXIT
-          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.4_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          entitlements=$(mktemp)
+          trap 'hdiutil detach "$mount_dir"; rm -f "$entitlements"' EXIT
+          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.5_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
           codesign --verify --deep --strict --verbose=4 "$mount_dir/Meeting Notes.app"
-      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.4_aarch64.dmg" Meeting-Notes.dmg
+          codesign -d --xml --entitlements "$entitlements" "$mount_dir/Meeting Notes.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$entitlements")" = true
+      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.5_aarch64.dmg" Meeting-Notes.dmg
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
           --title "Meeting Notes $GITHUB_REF_NAME"
-          --notes "Fixes zero-length computer-audio recordings by waiting for Core Audio's private aggregate device to become ready before capture starts. System audio remains independent of speaker volume and mute. Ad-hoc signed beta: replace any existing Meeting Notes app rather than keeping both."
+          --notes "Adds the required macOS audio-input entitlement and verifies it in the finished app signature before publishing. Computer audio remains independent of speaker volume and mute. Ad-hoc signed beta: after replacing the app and granting audio access, relaunch once before the first meeting."
         env:
           GH_TOKEN: ${{ github.token }}
