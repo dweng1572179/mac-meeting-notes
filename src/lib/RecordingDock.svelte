@@ -11,10 +11,10 @@
           ? error.message
           : 'The action could not be completed.';
     const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
-    if (code === 'microphone_capture') {
+    if (code === 'microphone_permission') {
       return `${detail} Open System Settings → Privacy & Security → Microphone, enable Meeting Notes, then try again.`;
     }
-    return code === 'audio_capture' || detail.includes('OSStatus')
+    return code === 'audio_permission'
       ? `${detail} Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Meeting Notes, then try again.`
       : detail;
   }

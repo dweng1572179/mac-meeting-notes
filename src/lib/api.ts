@@ -107,7 +107,7 @@ export async function startRecording(id: string): Promise<RecordingInfo> {
     await previewDelay();
     if (new URLSearchParams(window.location.search).get('captureError') === 'permission') {
       throw {
-        code: 'audio_capture',
+        code: 'audio_permission',
         message: '[SIMULATION] System audio capture was denied with OSStatus -66748.'
       };
     }

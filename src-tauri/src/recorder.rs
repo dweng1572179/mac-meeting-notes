@@ -166,10 +166,11 @@ mod native {
 
     use objc2::{rc::Retained, AnyThread};
     use objc2_audio_toolbox::{
-        kAudioConverterEncodeBitRate, kAudioFileM4AType, kExtAudioFileProperty_AudioConverter,
-        kExtAudioFileProperty_ClientDataFormat, AudioConverterRef, AudioConverterSetProperty,
-        AudioFileFlags, ExtAudioFileCreateWithURL, ExtAudioFileDispose, ExtAudioFileGetProperty,
-        ExtAudioFileRef, ExtAudioFileSetProperty, ExtAudioFileWriteAsync,
+        kAudioConverterApplicableEncodeBitRates, kAudioConverterEncodeBitRate, kAudioFileM4AType,
+        kExtAudioFileProperty_AudioConverter, kExtAudioFileProperty_ClientDataFormat,
+        AudioConverterGetProperty, AudioConverterGetPropertyInfo, AudioConverterRef,
+        AudioConverterSetProperty, AudioFileFlags, ExtAudioFileCreateWithURL, ExtAudioFileDispose,
+        ExtAudioFileGetProperty, ExtAudioFileRef, ExtAudioFileSetProperty, ExtAudioFileWriteAsync,
     };
     use objc2_core_audio::{
         kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceNameKey,
@@ -187,7 +188,7 @@ mod native {
     };
     use objc2_core_audio_types::{
         kAudioFormatLinearPCM, kAudioFormatMPEG4AAC, AudioBufferList, AudioStreamBasicDescription,
-        AudioTimeStamp,
+        AudioTimeStamp, AudioValueRange,
     };
     use objc2_core_foundation::{CFDictionary, CFURL};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
@@ -199,6 +200,7 @@ mod native {
 
     const NO_ERR: i32 = 0;
     const AAC_BIT_RATE: u32 = 24_000;
+    const AUDIO_PERMISSION_DENIED: i32 = -66748;
     const CALLBACK_GATE_CLOSED: usize = 1 << (usize::BITS - 1);
 
     pub(super) struct NativeRecording {
@@ -885,7 +887,55 @@ mod native {
                 "ExtAudioFileGetProperty returned an invalid audio converter",
             ));
         }
-        let mut bit_rate = AAC_BIT_RATE;
+        let mut ranges_size = 0;
+        // SAFETY: converter is live and ranges_size is a valid output.
+        check_status(
+            "AudioConverterGetPropertyInfo(applicable bit rates)",
+            unsafe {
+                AudioConverterGetPropertyInfo(
+                    converter,
+                    kAudioConverterApplicableEncodeBitRates,
+                    &mut ranges_size,
+                    ptr::null_mut(),
+                )
+            },
+        )?;
+        let range_size = size_of::<AudioValueRange>() as u32;
+        if ranges_size == 0 || ranges_size % range_size != 0 {
+            return Err(AppError::new(
+                "audio_capture",
+                "Audio converter returned invalid AAC bit-rate ranges",
+            ));
+        }
+        let mut ranges = vec![
+            AudioValueRange {
+                mMinimum: 0.0,
+                mMaximum: 0.0,
+            };
+            (ranges_size / range_size) as usize
+        ];
+        // SAFETY: ranges is sized from Core Audio's property info and both outputs are valid.
+        check_status("AudioConverterGetProperty(applicable bit rates)", unsafe {
+            AudioConverterGetProperty(
+                converter,
+                kAudioConverterApplicableEncodeBitRates,
+                NonNull::from(&mut ranges_size),
+                NonNull::new_unchecked(ranges.as_mut_ptr().cast()),
+            )
+        })?;
+        if ranges_size % range_size != 0 {
+            return Err(AppError::new(
+                "audio_capture",
+                "Audio converter returned invalid AAC bit-rate ranges",
+            ));
+        }
+        ranges.truncate((ranges_size / range_size) as usize);
+        let mut bit_rate = closest_bit_rate(&ranges, AAC_BIT_RATE).ok_or_else(|| {
+            AppError::new(
+                "audio_capture",
+                "Audio converter did not report a usable AAC bit rate",
+            )
+        })?;
         // SAFETY: the converter is owned by the live ExtAudioFile; bit_rate is an exact-size value.
         check_status("AudioConverterSetProperty(encode bit rate)", unsafe {
             AudioConverterSetProperty(
@@ -895,6 +945,24 @@ mod native {
                 NonNull::from(&mut bit_rate).cast(),
             )
         })
+    }
+
+    pub(super) fn closest_bit_rate(ranges: &[AudioValueRange], target: u32) -> Option<u32> {
+        ranges
+            .iter()
+            .filter(|range| {
+                range.mMinimum.is_finite()
+                    && range.mMaximum.is_finite()
+                    && range.mMinimum >= 0.0
+                    && range.mMinimum <= range.mMaximum
+                    && range.mMaximum <= u32::MAX as f64
+            })
+            .map(|range| {
+                (target as f64)
+                    .clamp(range.mMinimum, range.mMaximum)
+                    .round() as u32
+            })
+            .min_by_key(|candidate| (candidate.abs_diff(target), *candidate))
     }
 
     fn property_address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
@@ -931,15 +999,26 @@ mod native {
         }
     }
 
-    fn status_error(operation: &str, status: i32) -> AppError {
+    pub(super) fn status_error(operation: &str, status: i32) -> AppError {
         AppError::new(
-            "audio_capture",
+            if status == AUDIO_PERMISSION_DENIED {
+                "audio_permission"
+            } else {
+                "audio_capture"
+            },
             format!("{operation} failed with OSStatus {status}"),
         )
     }
 
-    fn microphone_error(error: AppError) -> AppError {
-        AppError::new("microphone_capture", error.message)
+    pub(super) fn microphone_error(error: AppError) -> AppError {
+        AppError::new(
+            if error.code == "audio_permission" {
+                "microphone_permission"
+            } else {
+                "microphone_capture"
+            },
+            error.message,
+        )
     }
 
     pub(super) fn combine_errors(errors: Vec<AppError>) -> AppError {
@@ -955,6 +1034,41 @@ mod native {
                 .collect::<Vec<_>>()
                 .join("; "),
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use objc2_core_audio_types::{kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked};
+
+        #[test]
+        fn configures_a_supported_aac_bit_rate_on_this_mac() {
+            let path = std::env::temp_dir().join(format!(
+                "meeting-notes-aac-compat-{}.m4a",
+                std::process::id()
+            ));
+            let client_format = AudioStreamBasicDescription {
+                mSampleRate: 48_000.0,
+                mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                mBytesPerPacket: 4,
+                mFramesPerPacket: 1,
+                mBytesPerFrame: 4,
+                mChannelsPerFrame: 1,
+                mBitsPerChannel: 32,
+                mReserved: 0,
+            };
+            let file = create_audio_file(&path, &client_format).unwrap();
+            set_client_format(file, &client_format).unwrap();
+
+            let result = set_bit_rate(file);
+            // SAFETY: file is live and no callback can access this test-only file.
+            let dispose_status = unsafe { ExtAudioFileDispose(file) };
+            let _ = std::fs::remove_file(path);
+
+            result.unwrap();
+            assert_eq!(dispose_status, NO_ERR);
+        }
     }
 }
 
@@ -1030,5 +1144,50 @@ mod tests {
         )]);
 
         assert_eq!(error.code, "microphone_capture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn microphone_errors_only_use_permission_guidance_for_permission_denials() {
+        assert_eq!(
+            native::microphone_error(AppError::new("audio_permission", "denied")).code,
+            "microphone_permission"
+        );
+        assert_eq!(
+            native::microphone_error(AppError::new("audio_capture", "codec failed")).code,
+            "microphone_capture"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unsupported_target_uses_the_nearest_applicable_aac_bit_rate() {
+        use objc2_core_audio_types::AudioValueRange;
+
+        let ranges = [
+            AudioValueRange {
+                mMinimum: 32_000.0,
+                mMaximum: 32_000.0,
+            },
+            AudioValueRange {
+                mMinimum: 40_000.0,
+                mMaximum: 40_000.0,
+            },
+        ];
+
+        assert_eq!(native::closest_bit_rate(&ranges, 24_000), Some(32_000));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_the_core_audio_permission_status_is_labeled_as_permission_failure() {
+        assert_eq!(
+            native::status_error("capture", -66748).code,
+            "audio_permission"
+        );
+        assert_eq!(
+            native::status_error("capture", 560226676).code,
+            "audio_capture"
+        );
     }
 }
