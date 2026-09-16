@@ -26,9 +26,18 @@ describe('captureErrorMessage', () => {
     );
   });
 
-  it('points system capture failures to the system-audio privacy setting', () => {
-    expect(captureErrorMessage({ code: 'audio_capture', message: 'Permission denied' })).toContain(
+  it('points system-audio permission failures to the system-audio privacy setting', () => {
+    expect(captureErrorMessage({ code: 'audio_permission', message: 'Permission denied' })).toContain(
       'Screen & System Audio Recording'
     );
+  });
+
+  it('does not mislabel an unsupported audio format as a privacy failure', () => {
+    expect(
+      captureErrorMessage({
+        code: 'audio_capture',
+        message: 'AudioConverterSetProperty failed with OSStatus 560226676'
+      })
+    ).not.toContain('Privacy & Security');
   });
 });
