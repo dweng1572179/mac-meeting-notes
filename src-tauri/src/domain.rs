@@ -40,6 +40,49 @@ pub struct Session {
     pub audio_path: Option<String>,
     #[serde(default)]
     pub microphone_audio_path: Option<String>,
+    #[serde(default)]
+    pub transcription: Vec<SourceTranscript>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub capture_health: Option<crate::recorder::RecordingHealth>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AudioSource {
+    System,
+    Microphone,
+}
+
+impl AudioSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System audio",
+            Self::Microphone => "Microphone",
+        }
+    }
+    pub fn filename(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Microphone => "mic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptChunk {
+    pub start_seconds: f64,
+    pub duration_seconds: f64,
+    pub transcript: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTranscript {
+    pub source: AudioSource,
+    pub chunks: Vec<TranscriptChunk>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -106,6 +149,9 @@ impl Session {
             error: None,
             audio_path: None,
             microphone_audio_path: None,
+            transcription: Vec::new(),
+            warnings: Vec::new(),
+            capture_health: None,
         }
     }
 

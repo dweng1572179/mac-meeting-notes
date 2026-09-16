@@ -77,3 +77,19 @@ test('meeting questions send the selected folder and question to the native core
     delete globalThis.window;
   }
 });
+
+test('capture health requests the active session and preserves source warnings', async () => {
+  globalThis.window = {};
+  mockIPC((command, payload) => {
+    assert.equal(command, 'recording_health');
+    assert.deepEqual(payload, { id: 'active-meeting' });
+    return { wallSeconds: 45, warnings: ['System audio has produced no frames.'] };
+  });
+  try {
+    const health = await api.recordingHealth('active-meeting');
+    assert.equal(health.wallSeconds, 45);
+    assert.deepEqual(health.warnings, ['System audio has produced no frames.']);
+  } finally {
+    delete globalThis.window;
+  }
+});

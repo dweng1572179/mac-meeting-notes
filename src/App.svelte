@@ -5,13 +5,15 @@
     createSession,
     deleteSession,
     deleteTranscript,
+    recordingHealth,
     onSessionUpdated
   } from './lib/api';
   import LibraryView from './lib/LibraryView.svelte';
   import MeetingEditor from './lib/MeetingEditor.svelte';
   import SettingsDialog from './lib/SettingsDialog.svelte';
   import Sidebar from './lib/Sidebar.svelte';
-  import type { Session } from './lib/types';
+  import type { RecordingHealth, Session } from './lib/types';
+  import { captureCoverage } from './lib/RecordingDock.svelte';
 
   let sessions = $state<Session[]>([]);
   let selectedId = $state<string | null>(null);
@@ -21,6 +23,31 @@
   let loading = $state(true);
   let creating = $state(false);
   let error = $state('');
+  let health = $state<RecordingHealth | null>(null);
+  let healthError = $state('');
+  let recordingId = $derived(sessions.find((session) => session.status === 'recording')?.id ?? null);
+
+  $effect(() => {
+    const id = recordingId;
+    health = null;
+    healthError = '';
+    if (!id) return;
+    let disposed = false;
+    let pending = false;
+    const refresh = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const next = await recordingHealth(id);
+        if (!disposed) { health = next; healthError = ''; }
+      } catch {
+        if (!disposed) healthError = 'Capture health is unavailable. Recording coverage cannot be verified.';
+      } finally { pending = false; }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 2_000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  });
   let editor = $state<{ flush: () => Promise<void> } | undefined>();
   let recordingBaselines = $state<Record<string, number>>({});
   let selected = $derived(sessions.find((session) => session.id === selectedId) ?? null);
@@ -128,6 +155,21 @@
   />
 
   <main>
+    {#if recordingId}
+      <aside class="capture-health" aria-label="Audio capture status">
+        <p>{health ? captureCoverage(health) : 'Checking audio capture…'}</p>
+        {#if healthError || health?.warnings.length}
+          <div role="alert">
+            {#if healthError}<p>{healthError}</p>{/if}
+            {#each health?.warnings ?? [] as warning}<p>{warning}</p>{/each}
+            <p>Check Microphone and Screen &amp; System Audio Recording permissions if audio is expected. Stop this recording before replacing or updating the app.</p>
+          </div>
+        {/if}
+        {#if selectedId !== recordingId}
+          <button type="button" onclick={() => selectSession(recordingId)}>Return to recording</button>
+        {/if}
+      </aside>
+    {/if}
     {#if error}
       <div class="app-error" role="alert">{error}</div>
     {/if}
@@ -140,6 +182,7 @@
           bind:this={editor}
           session={selected}
           {hasApiKey}
+          health={selected.id === recordingId ? health : null}
           recordingStartedAt={recordingBaselines[selected.id] ?? null}
           onRecordingStarted={rememberRecordingStart}
           onSessionChange={updateSession}

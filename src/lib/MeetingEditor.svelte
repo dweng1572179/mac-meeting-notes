@@ -25,12 +25,13 @@
   } from './api';
   import { createAutosave } from './autosave';
   import { parseMeetingMarkdown } from './markdown';
-  import RecordingDock from './RecordingDock.svelte';
-  import type { Session, UpdateSessionInput } from './types';
+  import RecordingDock, { captureCoverage } from './RecordingDock.svelte';
+  import type { RecordingHealth, Session, UpdateSessionInput } from './types';
 
   let {
     session,
     hasApiKey,
+    health = null,
     recordingStartedAt,
     onRecordingStarted,
     onSessionChange,
@@ -40,6 +41,7 @@
   }: {
     session: Session;
     hasApiKey: boolean;
+    health?: RecordingHealth | null;
     recordingStartedAt: number | null;
     onRecordingStarted: (id: string, baseline: number) => void;
     onSessionChange: (session: Session) => void;
@@ -241,6 +243,13 @@
     </div>
   </header>
 
+  {#if session.captureHealth || session.warnings?.length}
+    <aside class="capture-health" aria-label="Saved recording coverage">
+      {#if session.captureHealth}<p>{captureCoverage(session.captureHealth)}</p>{/if}
+      {#each session.warnings ?? [] as warning}<p>{warning}</p>{/each}
+    </aside>
+  {/if}
+
   <section class="notes-section" aria-labelledby="notes-title">
     <div class="notes-heading-row">
       <h2 id="notes-title">Notes</h2>
@@ -295,6 +304,7 @@
   <RecordingDock
     {session}
     {hasApiKey}
+    {health}
     {recordingStartedAt}
     {onRecordingStarted}
     onFlush={flush}

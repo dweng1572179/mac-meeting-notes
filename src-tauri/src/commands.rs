@@ -9,8 +9,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     domain::{
-        transition_to_failed, transition_to_processing, AppError, AppResult, CreateSessionInput,
-        MeetingAnswer, Session, SessionStatus, UpdateSessionInput,
+        transition_to_failed, transition_to_processing, AppError, AppResult, AudioSource,
+        CreateSessionInput, MeetingAnswer, Session, SessionStatus, SourceTranscript,
+        TranscriptChunk, UpdateSessionInput,
     },
     openai::{sections_to_markdown, OpenAiClient},
     recorder::{Recorder, RecordingFiles, RecordingInfo},
@@ -134,6 +135,14 @@ fn start_recording_state(
 }
 
 #[tauri::command]
+pub fn recording_health(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<crate::recorder::RecordingHealth> {
+    state.recorder.health(&id)
+}
+
+#[tauri::command]
 pub fn stop_recording(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -157,16 +166,12 @@ fn stop_recording_state(
         return Err(invalid_status("Only a recording session can be stopped"));
     }
     let mut session = match stop(id) {
-        Ok(paths) => transition_to_processing(
-            original.clone(),
-            paths.system.to_string_lossy().into_owned(),
-            Some(paths.microphone.to_string_lossy().into_owned()),
-        )?,
+        Ok(paths) => stopped_session(original.clone(), paths)?,
         Err(error) => transition_to_failed(original.clone(), error),
     };
     session.ended_at.get_or_insert_with(now);
     if let Err(error) = state.store.save(&session) {
-        session = transition_to_failed(original, error);
+        session = transition_to_failed(session, error);
         session.ended_at.get_or_insert_with(now);
         let _ = state.store.save(&session);
     }
@@ -313,34 +318,311 @@ fn spawn_processing(app: AppHandle, id: String) {
 
 async fn process_session(app: &AppHandle, id: &str) -> AppResult<()> {
     let state = app.state::<AppState>();
-    let mut session = load_session(&state, id)?;
     let api_key = ApiKeyStore::load()?
         .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
-
-    if needs_transcription(&session) {
-        let system_path = retained_audio_path(&state, &session)?;
-        let microphone_path = retained_microphone_audio_path(&state, &session)?;
-        if system_path.is_none() && microphone_path.is_none() {
-            return Err(AppError::new("audio_file", "Recorded audio is unavailable"));
-        }
-        let system_transcript = match system_path {
-            Some(path) => state.openai.transcribe(&path, &api_key).await?,
-            None => String::new(),
-        };
-        let microphone_transcript = match microphone_path {
-            Some(path) => state.openai.transcribe(&path, &api_key).await?,
-            None => String::new(),
-        };
-        let transcript = combine_transcripts(&system_transcript, &microphone_transcript)?;
-        persist_transcript(&state, id, transcript)?;
-    }
-
-    session = remove_retained_audio(&state, id)?;
-
-    let sections = state.openai.enrich(&session, &api_key).await?;
-    session = persist_complete(&state, id, sections_to_markdown(sections))?;
+    let session = process_session_with_key(&state, id, &api_key, |session| {
+        let _ = app.emit(SESSION_UPDATED, session);
+    })
+    .await?;
     let _ = app.emit(SESSION_UPDATED, session);
     Ok(())
+}
+
+async fn process_session_with_key(
+    state: &AppState,
+    id: &str,
+    api_key: &str,
+    progress: impl Fn(Session),
+) -> AppResult<Session> {
+    let session = load_session(state, id)?;
+    if needs_transcription(&session) || !session.transcription.is_empty() {
+        let mut first_error = None;
+        for source in [AudioSource::System, AudioSource::Microphone] {
+            if let Err(error) = transcribe_source(state, id, source, api_key, &progress).await {
+                if !matches!(
+                    error.code.as_str(),
+                    "audio_file"
+                        | "audio_chunk"
+                        | "audio_chunk_size"
+                        | "invalid_audio"
+                        | "no_speech"
+                        | "transcription_too_long"
+                ) {
+                    return Err(error);
+                }
+                update_processing(state, id, |session| {
+                    add_warning(
+                        session,
+                        format!(
+                            "{} could not be fully transcribed. Remaining audio was kept.",
+                            source.label()
+                        ),
+                    );
+                })?;
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
+    let session = load_session(state, id)?;
+    if session
+        .transcript
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Err(AppError::new(
+            "no_speech",
+            "No speech was detected. Your typed notes and source audio were kept.",
+        ));
+    }
+    let session = remove_retained_audio(state, id)?;
+    let sections = state.openai.enrich(&session, api_key).await?;
+    persist_complete(state, id, sections_to_markdown(sections))
+}
+
+async fn transcribe_source(
+    state: &AppState,
+    id: &str,
+    source: AudioSource,
+    api_key: &str,
+    progress: &impl Fn(Session),
+) -> AppResult<()> {
+    let session = load_session(state, id)?;
+    if !session
+        .transcription
+        .iter()
+        .any(|track| track.source == source)
+    {
+        let Some(path) = source_path(state, &session, source)? else {
+            return Ok(());
+        };
+        let info = crate::audio::inspect(&path)?;
+        let duration = info.frames as f64 / info.sample_rate;
+        let mut chunks = Vec::new();
+        let mut start = 0.0;
+        while start < duration {
+            let length = (duration - start).min(300.0);
+            chunks.push(TranscriptChunk {
+                start_seconds: start,
+                duration_seconds: length,
+                transcript: None,
+            });
+            start += length;
+        }
+        let prepared = update_processing(state, id, |session| {
+            if chunks.is_empty() {
+                add_warning(
+                    session,
+                    format!(
+                        "{} contained no audio frames. Notes use only the available sources.",
+                        source.label()
+                    ),
+                );
+            }
+            session
+                .transcription
+                .push(SourceTranscript { source, chunks });
+        })?;
+        progress(prepared);
+    }
+    loop {
+        let session = load_session(state, id)?;
+        let track = session
+            .transcription
+            .iter()
+            .find(|track| track.source == source)
+            .expect("prepared source");
+        let pending = track
+            .chunks
+            .iter()
+            .position(|chunk| chunk.transcript.is_none());
+        let Some(index) = pending else {
+            let has_speech = track.chunks.iter().any(|chunk| {
+                !chunk
+                    .transcript
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+            });
+            progress(update_processing(state, id, |session| {
+                let resolved = format!(
+                    "{} could not be fully transcribed. Remaining audio was kept.",
+                    source.label()
+                );
+                session.warnings.retain(|warning| warning != &resolved);
+            })?);
+            if !has_speech && !track.chunks.is_empty() {
+                progress(update_processing(state, id, |session| {
+                    add_warning(
+                        session,
+                        format!(
+                            "{} had no transcribed speech. Notes use only the available sources.",
+                            source.label()
+                        ),
+                    );
+                })?);
+            }
+            if has_speech {
+                cleanup_source(state, id, source)?;
+            }
+            return Ok(());
+        };
+        let chunk = track.chunks[index].clone();
+        let input = source_path(state, &session, source)?
+            .ok_or_else(|| AppError::new("audio_file", "Untranscribed source audio is unavailable. Your saved notes and transcript progress were kept."))?;
+        let output = state.store.chunk_path(id, source)?;
+        remove_audio_file(output.clone())?;
+        // Native decode/encode runs off the UI thread, with bounded PCM buffers and no capture-time rotation.
+        let output_for_write = output.clone();
+        let start = chunk.start_seconds;
+        let length = chunk.duration_seconds;
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::audio::write_chunk(&input, &output_for_write, start, length)
+        })
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "audio_chunk",
+                "Audio preparation was interrupted. Your source audio was kept.",
+            )
+        })??;
+        match state.openai.transcribe(&output, api_key).await {
+            Ok(text) => {
+                let saved = update_processing(state, id, |session| {
+                    let track = session
+                        .transcription
+                        .iter_mut()
+                        .find(|track| track.source == source)
+                        .expect("prepared source");
+                    track.chunks[index].transcript = Some(text);
+                    session.transcript = assembled_transcript(&session.transcription);
+                })?;
+                // Only the durable checkpoint permits deletion; the full source stays until every chunk is saved.
+                remove_audio_file(state.store.chunk_path(id, source)?)?;
+                progress(saved);
+            }
+            Err(error) if error.code == "transcription_too_long" && length > 30.0 => {
+                let saved = update_processing(state, id, |session| {
+                    let track = session
+                        .transcription
+                        .iter_mut()
+                        .find(|track| track.source == source)
+                        .expect("prepared source");
+                    track.chunks.splice(
+                        index..=index,
+                        [
+                            TranscriptChunk {
+                                start_seconds: start,
+                                duration_seconds: length / 2.0,
+                                transcript: None,
+                            },
+                            TranscriptChunk {
+                                start_seconds: start + length / 2.0,
+                                duration_seconds: length / 2.0,
+                                transcript: None,
+                            },
+                        ],
+                    );
+                })?;
+                progress(saved);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn source_path(
+    state: &AppState,
+    session: &Session,
+    source: AudioSource,
+) -> AppResult<Option<PathBuf>> {
+    match source {
+        AudioSource::System => retained_audio_path(state, session),
+        AudioSource::Microphone => retained_microphone_audio_path(state, session),
+    }
+}
+
+fn cleanup_source(state: &AppState, id: &str, source: AudioSource) -> AppResult<()> {
+    let _guard = lock_sessions(state)?;
+    let mut session = state.store.get(id)?;
+    if let Some(path) = source_path(state, &session, source)? {
+        remove_audio_file(path)?;
+    }
+    remove_audio_file(state.store.chunk_path(id, source)?)?;
+    match source {
+        AudioSource::System => session.audio_path = None,
+        AudioSource::Microphone => session.microphone_audio_path = None,
+    }
+    state.store.save(&session)
+}
+
+fn update_processing(
+    state: &AppState,
+    id: &str,
+    apply: impl FnOnce(&mut Session),
+) -> AppResult<Session> {
+    let _guard = lock_sessions(state)?;
+    let mut session = state.store.get(id)?;
+    apply(&mut session);
+    state.store.save(&session)?;
+    Ok(session)
+}
+
+fn add_warning(session: &mut Session, warning: String) {
+    if !session.warnings.contains(&warning) {
+        session.warnings.push(warning);
+    }
+}
+
+fn assembled_transcript(tracks: &[SourceTranscript]) -> Option<String> {
+    let mut chunks = tracks
+        .iter()
+        .flat_map(|track| {
+            track.chunks.iter().filter_map(move |chunk| {
+                chunk
+                    .transcript
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(|text| (track.source, chunk, text))
+            })
+        })
+        .collect::<Vec<_>>();
+    chunks
+        .sort_by(|(_, left, _), (_, right, _)| left.start_seconds.total_cmp(&right.start_seconds));
+    if chunks.is_empty() {
+        return None;
+    }
+    let mut text = "Source tracks overlap in time. Offsets below refer to each source's recorded audio, not verified wall-clock alignment; capture gaps can shift these offsets.
+
+".to_owned();
+    for (source, chunk, transcript) in chunks {
+        text.push_str(&format!(
+            "[{} – {}] {}:
+{}
+
+",
+            audio_time(chunk.start_seconds),
+            audio_time(chunk.start_seconds + chunk.duration_seconds),
+            source.label(),
+            transcript.trim()
+        ));
+    }
+    Some(text.trim_end().to_owned())
+}
+
+fn audio_time(seconds: f64) -> String {
+    let seconds = seconds.round() as u64;
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
 }
 
 fn save_failure(app: &AppHandle, id: &str, error: AppError) {
@@ -377,6 +659,7 @@ fn persist_recording(
     session.audio_path = Some(audio_path);
     session.microphone_audio_path = Some(microphone_audio_path);
     session.status = SessionStatus::Recording;
+    session.started_at = now();
     session.error = None;
     state.store.save(&session)?;
     Ok(session)
@@ -400,6 +683,24 @@ pub fn retry_start(mut session: Session) -> AppResult<Session> {
 }
 
 pub fn needs_transcription(session: &Session) -> bool {
+    if !session.transcription.is_empty() {
+        return session
+            .transcription
+            .iter()
+            .any(|track| track.chunks.iter().any(|chunk| chunk.transcript.is_none()))
+            || [
+                (AudioSource::System, &session.audio_path),
+                (AudioSource::Microphone, &session.microphone_audio_path),
+            ]
+            .iter()
+            .any(|(source, path)| {
+                path.is_some()
+                    && !session
+                        .transcription
+                        .iter()
+                        .any(|track| track.source == *source)
+            });
+    }
     match session.transcript.as_deref() {
         Some(transcript) => transcript.trim().is_empty(),
         None => true,
@@ -455,12 +756,21 @@ pub fn transcript_deleted(mut session: Session) -> AppResult<Session> {
         ));
     }
     session.transcript = None;
+    session.transcription.clear();
     session.enriched_notes = None;
-    session.status = SessionStatus::Draft;
-    session.error = None;
+    if session.audio_path.is_some() || session.microphone_audio_path.is_some() {
+        session.status = SessionStatus::Failed;
+        session.error = Some(AppError::new("transcript_deleted", "Transcript deleted. Your original notes and retained audio were kept. Retry will transcribe the remaining audio again."));
+    } else {
+        session.capture_health = None;
+        session.warnings.clear();
+        session.status = SessionStatus::Draft;
+        session.error = None;
+    }
     Ok(session)
 }
 
+#[cfg(test)]
 fn persist_transcript(state: &AppState, id: &str, transcript: String) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
     let mut session = state.store.get(id)?;
@@ -476,6 +786,9 @@ fn remove_retained_audio(state: &AppState, id: &str) -> AppResult<Session> {
         retained_audio_path(state, &session)?,
         retained_microphone_audio_path(state, &session)?,
     ];
+    for source in [AudioSource::System, AudioSource::Microphone] {
+        remove_audio_file(state.store.chunk_path(id, source)?)?;
+    }
     if retained.iter().any(Option::is_some) {
         for path in retained.into_iter().flatten() {
             remove_audio_file(path)?;
@@ -524,6 +837,9 @@ pub fn recover_interrupted_sessions(store: &SessionStore) -> AppResult<()> {
 }
 
 pub fn recover_interrupted(mut session: Session) -> Session {
+    if session.status == SessionStatus::Recording {
+        add_warning(&mut session, "Recording was interrupted. Capture may be incomplete; full meeting coverage could not be verified.".into());
+    }
     let message = if session.status == SessionStatus::Processing {
         "Processing was interrupted"
     } else {
@@ -533,13 +849,21 @@ pub fn recover_interrupted(mut session: Session) -> Session {
     transition_to_failed(session, AppError::new("interrupted", message))
 }
 
-pub fn interrupted_recording(session: Session, paths: RecordingFiles) -> AppResult<Session> {
-    transition_to_processing(
+fn stopped_session(session: Session, paths: RecordingFiles) -> AppResult<Session> {
+    let mut session = transition_to_processing(
         session,
         paths.system.to_string_lossy().into_owned(),
         Some(paths.microphone.to_string_lossy().into_owned()),
-    )
-    .map(recover_interrupted)
+    )?;
+    if let Some(health) = paths.health {
+        session.warnings.extend(health.warnings.iter().cloned());
+        session.capture_health = Some(health);
+    }
+    Ok(session)
+}
+
+pub fn interrupted_recording(session: Session, paths: RecordingFiles) -> AppResult<Session> {
+    stopped_session(session, paths).map(recover_interrupted)
 }
 
 fn audio_paths(app: &AppHandle, id: &str) -> AppResult<(PathBuf, PathBuf)> {
@@ -672,6 +996,12 @@ mod tests {
         let result = super::stop_recording_state(&state, &id, |_| {
             if fail_save {
                 Ok(RecordingFiles {
+                    health: Some(serde_json::from_value(serde_json::json!({
+                        "wallSeconds": 600.0, "identityChanged": false,
+                        "warnings": ["System audio capture was incomplete."],
+                        "system": {"admittedFrames":48000,"writtenFrames":48000,"capturedSeconds":1.0,"sampleRate":48000.0,"lastCallbackAgeSeconds":599.0,"writeError":null,"status":"short_capture"},
+                        "microphone": {"admittedFrames":48000,"writtenFrames":48000,"capturedSeconds":1.0,"sampleRate":48000.0,"lastCallbackAgeSeconds":599.0,"writeError":null,"status":"short_capture"}
+                    })).unwrap()),
                     system: path.clone(),
                     microphone: microphone_path.clone(),
                 })
@@ -694,6 +1024,13 @@ mod tests {
             recording.microphone_audio_path
         );
         assert!(published.ended_at.is_some());
+        if fail_save {
+            assert!(
+                published.capture_health.is_some(),
+                "stop-save failure must preserve capture evidence"
+            );
+            assert_eq!(published.warnings, ["System audio capture was incomplete."]);
+        }
         assert_eq!(
             published.error.unwrap().code,
             if fail_save {
@@ -787,7 +1124,7 @@ mod tests {
             "request stalled for {elapsed:?}"
         );
         assert_eq!(failed.status, SessionStatus::Failed);
-        assert_eq!(failed.error.unwrap().code, "openai");
+        assert_eq!(failed.error.unwrap().code, "openai_timeout");
         assert_eq!(retry.original_notes, "rent roll");
         assert_eq!(retry.audio_path, session.audio_path);
         assert_eq!(audio, "retryable audio");
@@ -971,3 +1308,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "processing_tests.rs"]
+mod processing_tests;

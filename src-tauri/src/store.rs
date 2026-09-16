@@ -6,7 +6,7 @@ use std::{
 
 use chrono::{DateTime, FixedOffset};
 
-use crate::domain::{AppError, AppResult, Session};
+use crate::domain::{AppError, AppResult, AudioSource, Session};
 
 pub struct SessionStore {
     root: PathBuf,
@@ -49,6 +49,7 @@ impl SessionStore {
 
     pub fn save(&self, session: &Session) -> AppResult<()> {
         self.validate_id(&session.id)?;
+        validate_transcription(session)?;
         if let Some(path) = session.audio_path.as_deref() {
             self.validate_audio_path(&session.id, path)?;
         }
@@ -121,6 +122,12 @@ impl SessionStore {
         self.validate_named_audio_path(id, audio_path, &format!("{id}-mic.m4a"))
     }
 
+    pub(crate) fn chunk_path(&self, id: &str, source: AudioSource) -> AppResult<PathBuf> {
+        let filename = format!("{id}-{}-chunk.m4a", source.filename());
+        let path = self.root.join("audio").join(&filename);
+        self.validate_named_audio_path(id, &path.to_string_lossy(), &filename)
+    }
+
     fn validate_named_audio_path(
         &self,
         id: &str,
@@ -191,7 +198,10 @@ impl SessionStore {
                 .map(|path| self.validate_microphone_audio_path(id, path)),
         ];
         let mut removed_audio = false;
-        for audio_path in audio_paths.into_iter().flatten() {
+        for audio_path in audio_paths.into_iter().flatten().chain([
+            self.chunk_path(id, AudioSource::System),
+            self.chunk_path(id, AudioSource::Microphone),
+        ]) {
             let audio_path = audio_path?;
             match fs::remove_file(audio_path) {
                 Ok(()) => removed_audio = true,
@@ -211,7 +221,9 @@ impl SessionStore {
         self.sessions_dir()?;
         validate_file(&path)?;
         let json = fs::read(path).map_err(io_error)?;
-        serde_json::from_slice(&json).map_err(json_error)
+        let session: Session = serde_json::from_slice(&json).map_err(json_error)?;
+        validate_transcription(&session)?;
+        Ok(session)
     }
 
     fn validate_id(&self, id: &str) -> AppResult<()> {
@@ -225,6 +237,36 @@ impl SessionStore {
             Err(AppError::new("invalid_session_id", "Session ID is invalid"))
         }
     }
+}
+
+fn validate_transcription(session: &Session) -> AppResult<()> {
+    let invalid = || {
+        AppError::new(
+            "invalid_transcription",
+            "Saved transcription progress is invalid. Your meeting files were kept.",
+        )
+    };
+    for (index, track) in session.transcription.iter().enumerate() {
+        if session.transcription[..index]
+            .iter()
+            .any(|prior| prior.source == track.source)
+        {
+            return Err(invalid());
+        }
+        let mut end = 0.0;
+        for chunk in &track.chunks {
+            if !chunk.start_seconds.is_finite()
+                || !chunk.duration_seconds.is_finite()
+                || chunk.duration_seconds <= 0.0
+                || chunk.duration_seconds > 300.0
+                || (chunk.start_seconds - end).abs() > 0.000_001
+            {
+                return Err(invalid());
+            }
+            end = chunk.start_seconds + chunk.duration_seconds;
+        }
+    }
+    Ok(())
 }
 
 fn validate_directory(path: &Path) -> AppResult<()> {

@@ -779,3 +779,19 @@ main {
     animation-iteration-count: 1 !important;
   }
 }
+
+.capture-health {
+  width: min(100%, 820px);
+  margin: 0 auto 24px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid #957219;
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.capture-health p { margin: 4px 0; }
+.capture-health [role="alert"] { color: var(--danger); }
+.capture-health button { margin-top: 8px; }

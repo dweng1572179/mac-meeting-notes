@@ -6,6 +6,7 @@ import type {
   CreateSessionInput,
   MeetingAnswer,
   RecordingInfo,
+  RecordingHealth,
   Session,
   UpdateSessionInput
 } from './types';
@@ -244,4 +245,13 @@ export function createCloseHandler(
 
 export async function destroyCurrentWindow(): Promise<void> {
   if (isNative()) await getCurrentWindow().destroy();
+}
+
+export async function recordingHealth(id: string): Promise<RecordingHealth> {
+  if (!isNative()) {
+    const source = { admittedFrames: 0, writtenFrames: 0, capturedSeconds: 0, sampleRate: 48_000, lastCallbackAgeSeconds: null, writeError: null, status: 'no_frames' as const };
+    return { wallSeconds: 12, system: source, microphone: source, identityChanged: false,
+      warnings: ['[SIMULATION] System audio has produced no frames.', '[SIMULATION] Microphone has produced no frames.'] };
+  }
+  return invoke<RecordingHealth>('recording_health', { id });
 }

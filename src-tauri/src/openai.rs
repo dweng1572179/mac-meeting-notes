@@ -60,10 +60,20 @@ impl OpenAiClient {
             .send()
             .await
             .map_err(openai_request_error)?;
-        ensure_success(response.status())
+        ensure_success(response).await.map(|_| ())
     }
 
     pub async fn transcribe(&self, audio_path: &Path, api_key: &str) -> AppResult<String> {
+        if std::fs::metadata(audio_path)
+            .map_err(|_| AppError::new("audio_file", "Unable to read recorded audio"))?
+            .len()
+            >= 25_000_000
+        {
+            return Err(AppError::new(
+                "audio_too_large",
+                "Recorded audio exceeds the upload limit. Your audio was kept.",
+            ));
+        }
         let audio = std::fs::read(audio_path)
             .map_err(|_| AppError::new("audio_file", "Unable to read recorded audio"))?;
         if !has_m4a_media(&audio)? {
@@ -92,12 +102,25 @@ impl OpenAiClient {
             .send()
             .await
             .map_err(openai_request_error)?;
-        ensure_success(response.status())?;
-        response
-            .json::<Transcription>()
-            .await
-            .map(|response| response.text)
-            .map_err(|_| AppError::new("openai", "OpenAI returned an invalid transcription"))
+        let response = ensure_success(response).await?;
+        let transcription = response.json::<Transcription>().await.map_err(|_| {
+            AppError::new(
+                "openai",
+                "OpenAI returned an invalid transcription. Your audio was kept.",
+            )
+        })?;
+        if transcription
+            .usage
+            .as_ref()
+            .and_then(|usage| usage["output_tokens"].as_u64())
+            .is_some_and(|tokens| tokens >= 1_900)
+        {
+            return Err(AppError::new(
+                "transcription_too_long",
+                "OpenAI reached the transcription output limit. Your audio was kept.",
+            ));
+        }
+        Ok(transcription.text)
     }
 
     pub async fn enrich(&self, session: &Session, api_key: &str) -> AppResult<EnrichedSections> {
@@ -110,7 +133,7 @@ impl OpenAiClient {
             .send()
             .await
             .map_err(openai_request_error)?;
-        ensure_success(response.status())?;
+        let response = ensure_success(response).await?;
         let response = response
             .json::<Value>()
             .await
@@ -135,7 +158,7 @@ impl OpenAiClient {
             .send()
             .await
             .map_err(openai_request_error)?;
-        ensure_success(response.status())?;
+        let response = ensure_success(response).await?;
         let response = response
             .json::<Value>()
             .await
@@ -157,24 +180,27 @@ impl Default for OpenAiClient {
 #[derive(Deserialize)]
 struct Transcription {
     text: String,
+    #[serde(default)]
+    usage: Option<Value>,
 }
 
 pub fn build_enrichment_request(session: &Session) -> Value {
     json!({
         "model": ENRICHMENT_MODEL,
         "store": false,
-        "instructions": "Create meeting notes from only the supplied content. Preserve substantive user notes and prioritize their emphasis. Treat a later explicit decision as overriding an earlier tentative suggestion. Retain [SIMULATION] labels. Use only supplied property facts, mark uncertainty, and leave unsupported sections empty.",
+        "instructions": "Create meeting notes from only the supplied content. Preserve substantive user notes and prioritize their emphasis. Treat a later explicit decision as overriding an earlier tentative suggestion. Retain [SIMULATION] labels. Use only supplied property facts, mark uncertainty, and leave unsupported sections empty. Source tracks may overlap and are not separate sequential meetings. Respect capture warnings; never imply missing parts were captured.",
         "input": [{
             "role": "user",
             "content": [{
                 "type": "input_text",
                 "text": format!(
-                    "Title: {}\nContext: {}\nAttendees: {}\nOriginal notes: {}\nTranscript: {}",
+                    "Title: {}\nContext: {}\nAttendees: {}\nOriginal notes: {}\nTranscript: {}\nCapture warnings: {}",
                     session.title,
                     session.context,
                     session.attendees.join(", "),
                     session.original_notes,
                     session.transcript.as_deref().unwrap_or_default(),
+                    session.warnings.join(" "),
                 ),
             }]
         }],
@@ -359,26 +385,115 @@ pub fn sections_to_markdown(sections: EnrichedSections) -> String {
     }
 }
 
-fn ensure_success(status: StatusCode) -> AppResult<()> {
-    match status {
-        status if status.is_success() => Ok(()),
-        StatusCode::UNAUTHORIZED => Err(AppError::new(
-            "invalid_api_key",
-            "OpenAI rejected the API key",
-        )),
-        StatusCode::PAYLOAD_TOO_LARGE => Err(AppError::new(
-            "audio_too_large",
-            "Recorded audio is too large",
-        )),
-        StatusCode::TOO_MANY_REQUESTS => {
-            Err(AppError::new("rate_limited", "OpenAI rate limit reached"))
-        }
-        _ => Err(AppError::new("openai", "OpenAI request failed")),
+async fn ensure_success(mut response: reqwest::Response) -> AppResult<reqwest::Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
     }
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            value.starts_with("req_")
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+        .map(str::to_owned);
+    // Error messages can echo credentials or meeting content; classify them, never display the body.
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if body.len() + chunk.len() > 65_536 {
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let envelope = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let error = &envelope["error"];
+    let api_code = error["code"].as_str().unwrap_or_default();
+    let param = error["param"].as_str().unwrap_or_default();
+    let reason = error["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let (code, message) = if status == StatusCode::UNAUTHORIZED || api_code == "invalid_api_key" {
+        (
+            "invalid_api_key",
+            "OpenAI rejected the API key. Update it in Settings.".into(),
+        )
+    } else if status == StatusCode::FORBIDDEN
+        || api_code == "model_not_found"
+        || api_code == "permission_denied"
+    {
+        ("model_access", "This API key cannot access the requested OpenAI model. Check project permissions and model access.".into())
+    } else if api_code == "insufficient_quota" {
+        (
+            "quota_exceeded",
+            "OpenAI API quota is exhausted. Check billing and project limits, then retry.".into(),
+        )
+    } else if status == StatusCode::TOO_MANY_REQUESTS {
+        (
+            "rate_limited",
+            "OpenAI rate limit reached. Wait briefly, then retry.".into(),
+        )
+    } else if status == StatusCode::PAYLOAD_TOO_LARGE {
+        (
+            "audio_too_large",
+            "Recorded audio exceeds the upload limit. Your audio was kept.".into(),
+        )
+    } else if api_code == "context_length_exceeded" || reason.contains("maximum content size") {
+        (
+            "input_too_large",
+            "OpenAI rejected input that exceeds its limit. Your notes and pending audio were kept."
+                .into(),
+        )
+    } else if status == StatusCode::BAD_REQUEST
+        && (param == "file" || reason.contains("audio file") || reason.contains("invalid audio"))
+    {
+        (
+            "invalid_audio",
+            "OpenAI could not read this recording. Your audio was kept.".into(),
+        )
+    } else if status.is_server_error() {
+        (
+            "openai_server",
+            format!(
+                "OpenAI is temporarily unavailable (HTTP {}). Retry later; saved progress is kept.",
+                status.as_u16()
+            ),
+        )
+    } else if status == StatusCode::REQUEST_TIMEOUT {
+        (
+            "openai_timeout",
+            "OpenAI timed out. Your notes and pending audio were kept. Retry when ready.".into(),
+        )
+    } else {
+        (
+            "openai",
+            format!(
+                "OpenAI rejected the request (HTTP {}). Your notes and pending audio were kept.",
+                status.as_u16()
+            ),
+        )
+    };
+    let message = match request_id {
+        Some(id) => format!("{message} Request ID: {id}"),
+        None => message,
+    };
+    Err(AppError::new(code, message))
 }
 
-fn openai_request_error(_: reqwest::Error) -> AppError {
-    AppError::new("openai", "OpenAI request failed")
+fn openai_request_error(error: reqwest::Error) -> AppError {
+    if error.is_timeout() {
+        AppError::new(
+            "openai_timeout",
+            "OpenAI timed out. Your notes and pending audio were kept. Retry when ready.",
+        )
+    } else {
+        AppError::new("openai_network", "Could not connect to OpenAI. Check your internet connection and retry. Your notes and pending audio were kept.")
+    }
 }
 
 fn has_m4a_media(mut bytes: &[u8]) -> AppResult<bool> {

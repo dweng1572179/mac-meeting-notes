@@ -121,6 +121,7 @@ fn normal_exit_marks_recording_failed_with_returned_audio() {
     let interrupted = interrupted_recording(
         recording_session(),
         RecordingFiles {
+            health: None,
             system: "/tmp/flushed.m4a".into(),
             microphone: "/tmp/flushed-mic.m4a".into(),
         },
@@ -203,6 +204,7 @@ fn exit_cleanup_is_idempotent_after_flushing_the_active_recorder() {
     stop_recording_in_store_on_exit(&store, |_| {
         stops += 1;
         Ok(RecordingFiles {
+            health: None,
             system: audio_path.clone(),
             microphone: microphone_audio_path.clone(),
         })
@@ -219,4 +221,15 @@ fn exit_cleanup_is_idempotent_after_flushing_the_active_recorder() {
         recording.microphone_audio_path.as_deref()
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recovered_recording_keeps_an_honest_coverage_warning_after_retry() {
+    let recovered = recover_interrupted(recording_session());
+    let retry = retry_start(recovered).unwrap();
+    assert!(retry
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Recording was interrupted")
+            && warning.contains("incomplete")));
 }

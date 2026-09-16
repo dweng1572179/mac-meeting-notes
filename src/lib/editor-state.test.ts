@@ -17,6 +17,11 @@ describe('elapsedRecordingSeconds', () => {
     expect(elapsedRecordingSeconds(1_000, 5_250)).toBe(4);
     expect(elapsedRecordingSeconds(5_000, 4_000)).toBe(0);
   });
+
+  it('keeps sleep time reported by the native capture clock in the dock timer', () => {
+    expect(elapsedRecordingSeconds(0, 60_000, 120)).toBe(120);
+    expect(elapsedRecordingSeconds(0, 125_000, 124)).toBe(125);
+  });
 });
 
 describe('captureErrorMessage', () => {
@@ -48,5 +53,14 @@ describe('captureErrorMessage', () => {
         message: 'AudioConverterSetProperty failed with OSStatus 560226676'
       })
     ).not.toContain('Privacy & Security');
+  });
+});
+
+describe('captureCoverage', () => {
+  it('shows captured source durations separately from elapsed wall time', async () => {
+    const { captureCoverage } = await import('./RecordingDock.svelte');
+    expect(captureCoverage({ wallSeconds: 8734, system: { capturedSeconds: 0 }, microphone: { capturedSeconds: 4320 } })).toBe(
+      'Elapsed 2:25:34 · Captured: system 0:00, microphone 1:12:00'
+    );
   });
 });

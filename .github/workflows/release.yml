@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v0.2.5']
+    tags: ['v0.2.6']
 
 permissions:
   contents: write
@@ -20,20 +20,21 @@ jobs:
       - run: npm run check
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - run: npm run tauri build -- --target aarch64-apple-darwin
+      - run: npm run tauri build -- --target aarch64-apple-darwin --bundles app
+      - run: node scripts/package-dmg.test.mjs "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Meeting Notes.app"
+      - run: node scripts/package-dmg.mjs "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Meeting Notes.app" Meeting-Notes.dmg
       - name: Verify packaged app signature
         run: |
           mount_dir=$(mktemp -d)
           entitlements=$(mktemp)
           trap 'hdiutil detach "$mount_dir"; rm -f "$entitlements"' EXIT
-          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.5_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          hdiutil attach Meeting-Notes.dmg -readonly -nobrowse -mountpoint "$mount_dir"
           codesign --verify --deep --strict --verbose=4 "$mount_dir/Meeting Notes.app"
           codesign -d --xml --entitlements "$entitlements" "$mount_dir/Meeting Notes.app"
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$entitlements")" = true
-      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.5_aarch64.dmg" Meeting-Notes.dmg
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
           --title "Meeting Notes $GITHUB_REF_NAME"
-          --notes "Adds the required macOS audio-input entitlement and verifies it in the finished app signature before publishing. Computer audio remains independent of speaker volume and mute. Ad-hoc signed beta: after replacing the app and granting audio access, relaunch once before the first meeting."
+          --notes-file docs/releases/v0.2.6.md
         env:
           GH_TOKEN: ${{ github.token }}
