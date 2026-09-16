@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v0.2.1']
+    tags: ['v0.2.2']
 
 permissions:
   contents: write
@@ -25,12 +25,12 @@ jobs:
         run: |
           mount_dir=$(mktemp -d)
           trap 'hdiutil detach "$mount_dir"' EXIT
-          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.1_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.2_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
           codesign --verify --deep --strict --verbose=4 "$mount_dir/Meeting Notes.app"
-      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.1_aarch64.dmg" Meeting-Notes.dmg
+      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.2_aarch64.dmg" Meeting-Notes.dmg
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
           --title "Meeting Notes $GITHUB_REF_NAME"
-          --notes "Fixes failed processing when one recorded track contains no audio frames. Computer audio and microphone are still captured independently; an empty source is skipped so the usable source can complete. Ad-hoc signed beta: replace any existing Meeting Notes app rather than keeping both."
+          --notes "Fixes missing computer audio when meetings use headphones, a non-default output, or change audio routes. Speech capture is compressed for hour-plus classes to stay below OpenAI's upload limit. Ad-hoc signed beta: replace any existing Meeting Notes app rather than keeping both."
         env:
           GH_TOKEN: ${{ github.token }}
