@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod commands;
 pub mod domain;
 pub mod openai;
@@ -19,6 +20,7 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::save_session,
             commands::start_recording,
             commands::stop_recording,
+            commands::recording_health,
             commands::retry_processing,
             commands::delete_session,
             commands::delete_transcript,

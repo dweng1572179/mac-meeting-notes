@@ -15,6 +15,12 @@ export type Session = {
   error: { code: string; message: string } | null;
   audioPath: string | null;
   microphoneAudioPath: string | null;
+  warnings?: string[];
+  captureHealth?: RecordingHealth | null;
+  transcription?: {
+    source: 'system' | 'microphone';
+    chunks: { startSeconds: number; durationSeconds: number; transcript: string | null }[];
+  }[];
 };
 
 export type Bootstrap = { sessions: Session[]; hasApiKey: boolean };
@@ -28,3 +34,20 @@ export type RecordingInfo = { sessionId: string; startedAt: string };
 
 export type MeetingCitation = { sessionId: string; title: string; excerpt: string };
 export type MeetingAnswer = { answer: string; citations: MeetingCitation[] };
+
+export type SourceHealth = {
+  admittedFrames: number;
+  writtenFrames: number;
+  capturedSeconds: number;
+  sampleRate: number;
+  lastCallbackAgeSeconds: number | null;
+  writeError: number | null;
+  status: 'starting' | 'healthy' | 'no_frames' | 'stalled' | 'write_error' | 'short_capture';
+};
+export type RecordingHealth = {
+  wallSeconds: number;
+  system: SourceHealth;
+  microphone: SourceHealth;
+  identityChanged: boolean;
+  warnings: string[];
+};

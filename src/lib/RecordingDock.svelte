@@ -1,6 +1,15 @@
 <script module lang="ts">
-  export function elapsedRecordingSeconds(startedAt: number, now: number) {
-    return Math.max(0, Math.floor((now - startedAt) / 1000));
+  export function captureCoverage(health: { wallSeconds: number; system: { capturedSeconds: number }; microphone: { capturedSeconds: number } }) {
+    const duration = (value: number) => {
+      const seconds = Math.max(0, Math.floor(value));
+      const tail = `${Math.floor(seconds / 60) % 60}:${String(seconds % 60).padStart(2, '0')}`;
+      return seconds >= 3600 ? `${Math.floor(seconds / 3600)}:${tail.padStart(5, '0')}` : tail;
+    };
+    return `Elapsed ${duration(health.wallSeconds)} · Captured: system ${duration(health.system.capturedSeconds)}, microphone ${duration(health.microphone.capturedSeconds)}`;
+  }
+
+  export function elapsedRecordingSeconds(startedAt: number, now: number, nativeWallSeconds = 0) {
+    return Math.floor(Math.max(0, (now - startedAt) / 1000, nativeWallSeconds));
   }
 
   export function captureErrorMessage(error: unknown) {
@@ -23,11 +32,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { retryProcessing, startRecording, stopRecording } from './api';
-  import type { Session } from './types';
+  import type { RecordingHealth, Session } from './types';
 
   let {
     session,
     hasApiKey,
+    health = null,
     recordingStartedAt,
     onRecordingStarted,
     onFlush,
@@ -36,6 +46,7 @@
   }: {
     session: Session;
     hasApiKey: boolean;
+    health?: RecordingHealth | null;
     recordingStartedAt: number | null;
     onRecordingStarted: (id: string, baseline: number) => void;
     onFlush: () => Promise<void>;
@@ -74,7 +85,7 @@
     return () => window.clearInterval(timer);
   });
 
-  const elapsed = () => elapsedRecordingSeconds(recordingStarted ?? now, now);
+  const elapsed = () => elapsedRecordingSeconds(recordingStarted ?? now, now, health?.wallSeconds);
   const elapsedLabel = () => {
     const seconds = elapsed();
     const hours = Math.floor(seconds / 3600);
@@ -138,7 +149,7 @@
   <div class="recording-dock live" aria-label="Meeting recording in progress">
     <span class="sr-only" role="status">Recording started.</span>
     <span class="recording-dot" aria-hidden="true"></span>
-    <span>Microphone + computer</span>
+    <span>{health?.warnings.length ? 'Check audio capture' : 'Recording'}</span>
     <time aria-label={`Elapsed recording time ${elapsedLabel()}`}>{elapsedLabel()}</time>
     <button type="button" disabled={pending !== null} onclick={stop}>
       {pending === 'stop' ? 'Stopping…' : 'Stop'}
@@ -147,7 +158,7 @@
 {:else if session.status === 'processing'}
   <div class="recording-dock processing" role="status" aria-live="polite">
     <span class="processing-dot" aria-hidden="true"></span>
-    <span>Processing meeting</span>
+    <span>Processing meeting{session.transcription?.length ? ` · ${session.transcription.flatMap((track) => track.chunks).filter((chunk) => chunk.transcript !== null).length}/${session.transcription.flatMap((track) => track.chunks).length} chunks saved` : ''}</span>
     <span class="processing-line" aria-hidden="true"></span>
   </div>
 {:else if session.status === 'failed' && (session.audioPath !== null || session.microphoneAudioPath !== null || session.transcript !== null)}

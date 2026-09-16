@@ -1,6 +1,10 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicI32, AtomicU64, Ordering},
+        Mutex,
+    },
+    time::SystemTime,
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -18,6 +22,212 @@ pub struct RecordingInfo {
 pub struct RecordingFiles {
     pub system: PathBuf,
     pub microphone: PathBuf,
+    pub health: Option<RecordingHealth>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingHealth {
+    pub wall_seconds: f64,
+    pub system: SourceHealth,
+    pub microphone: SourceHealth,
+    pub identity_changed: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceHealth {
+    pub admitted_frames: u64,
+    // Frames accepted by ExtAudioFileWriteAsync; stop also reports final flush errors.
+    pub written_frames: u64,
+    pub captured_seconds: f64,
+    pub sample_rate: f64,
+    pub last_callback_age_seconds: Option<f64>,
+    pub write_error: Option<i32>,
+    pub status: CaptureStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureStatus {
+    Starting,
+    Healthy,
+    NoFrames,
+    Stalled,
+    WriteError,
+    ShortCapture,
+}
+
+#[derive(Default)]
+struct SourceCounters {
+    admitted_frames: AtomicU64,
+    written_frames: AtomicU64,
+    // Zero means no callback; other values are elapsed milliseconds plus one.
+    last_callback_ms: AtomicU64,
+    last_written_frame_ms: AtomicU64,
+    write_status: AtomicI32,
+}
+
+impl SourceCounters {
+    fn callback(&self, elapsed_ms: u64) {
+        self.last_callback_ms
+            .store(elapsed_ms.saturating_add(1), Ordering::Release);
+    }
+
+    fn admit(&self, frames: u32) {
+        self.admitted_frames
+            .fetch_add(u64::from(frames), Ordering::Relaxed);
+    }
+
+    fn complete_write(&self, frames: u32, status: i32) {
+        if status == 0 {
+            if frames != 0 {
+                self.last_written_frame_ms.store(
+                    self.last_callback_ms.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+            }
+            self.written_frames
+                .fetch_add(u64::from(frames), Ordering::Release);
+        } else {
+            let _ =
+                self.write_status
+                    .compare_exchange(0, status, Ordering::AcqRel, Ordering::Acquire);
+        }
+    }
+
+    fn snapshot(&self, sample_rate: f64, wall_seconds: f64, stopped: bool) -> SourceHealth {
+        let written_frames = self.written_frames.load(Ordering::Acquire);
+        let admitted_frames = self.admitted_frames.load(Ordering::Acquire);
+        let last_callback = self.last_callback_ms.load(Ordering::Acquire);
+        let last_callback_age_seconds = last_callback
+            .checked_sub(1)
+            .map(|ms| (wall_seconds - ms as f64 / 1000.0).max(0.0));
+        let last_frame_age_seconds = self
+            .last_written_frame_ms
+            .load(Ordering::Acquire)
+            .checked_sub(1)
+            .map(|ms| (wall_seconds - ms as f64 / 1000.0).max(0.0));
+        let captured_seconds = written_frames as f64 / sample_rate;
+        let write_status = self.write_status.load(Ordering::Acquire);
+        let missing_seconds = wall_seconds - captured_seconds;
+        let status = if write_status != 0 {
+            CaptureStatus::WriteError
+        } else if written_frames == 0 {
+            if stopped || wall_seconds >= 10.0 {
+                CaptureStatus::NoFrames
+            } else {
+                CaptureStatus::Starting
+            }
+        } else if !stopped && last_frame_age_seconds.is_some_and(|age| age >= 10.0) {
+            CaptureStatus::Stalled
+        } else if stopped && (missing_seconds > 5.0 || missing_seconds > wall_seconds * 0.05) {
+            CaptureStatus::ShortCapture
+        } else {
+            CaptureStatus::Healthy
+        };
+        SourceHealth {
+            admitted_frames,
+            written_frames,
+            captured_seconds,
+            sample_rate,
+            last_callback_age_seconds,
+            write_error: (write_status != 0).then_some(write_status),
+            status,
+        }
+    }
+}
+
+impl RecordingHealth {
+    fn from_sources(wall_seconds: f64, system: SourceHealth, microphone: SourceHealth) -> Self {
+        let mut warnings = Vec::new();
+        for (label, source) in [("System audio", &system), ("Microphone", &microphone)] {
+            let detail = match source.status {
+                CaptureStatus::NoFrames => Some("has produced no audio frames".to_owned()),
+                CaptureStatus::Stalled => Some(
+                    "has not delivered writable audio frames for at least 10 seconds".to_owned(),
+                ),
+                CaptureStatus::WriteError => Some(format!(
+                    "could not write some audio (OSStatus {})",
+                    source.write_error.unwrap_or_default()
+                )),
+                CaptureStatus::ShortCapture => Some(format!(
+                    "captured {:.1} seconds of a {:.1}-second recording",
+                    source.captured_seconds, wall_seconds
+                )),
+                CaptureStatus::Starting | CaptureStatus::Healthy => None,
+            };
+            if let Some(detail) = detail {
+                warnings.push(format!("{label} {detail}."));
+            }
+            // A write failure can coexist with a substantial gap; preserve the duration evidence.
+            if source.status == CaptureStatus::WriteError {
+                warnings.push(format!(
+                    "{label} accepted {:.1} seconds of audio during {:.1} seconds of recording.",
+                    source.captured_seconds, wall_seconds
+                ));
+            }
+        }
+        Self {
+            wall_seconds,
+            system,
+            microphone,
+            identity_changed: false,
+            warnings,
+        }
+    }
+
+    fn set_identity_changed(&mut self, changed: bool) {
+        self.identity_changed = changed;
+        if changed {
+            self.warnings.push("The app executable changed while this process was running. macOS privacy permissions may have changed and capture may be incomplete. Avoid replacing the app during recording; stable Developer ID signing is needed to prevent ad-hoc identity changes.".to_owned());
+        }
+    }
+}
+
+#[derive(PartialEq)]
+struct ExecutableFingerprint {
+    length: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl ExecutableFingerprint {
+    fn read(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        })
+    }
+}
+
+struct ExecutableIdentity {
+    path: PathBuf,
+    baseline: Option<ExecutableFingerprint>,
+}
+
+impl ExecutableIdentity {
+    fn read(path: PathBuf) -> Self {
+        Self {
+            baseline: ExecutableFingerprint::read(&path),
+            path,
+        }
+    }
+
+    fn changed(&self) -> bool {
+        self.baseline != ExecutableFingerprint::read(&self.path)
+    }
 }
 
 #[derive(Default)]
@@ -54,12 +264,14 @@ impl RecordingSlot {
 pub struct Recorder {
     // ponytail: one global recording matches the single-window v1; move to per-session recorders only if concurrent capture becomes a real requirement.
     slot: Mutex<RecordingSlot>,
+    executable: Option<ExecutableIdentity>,
 }
 
 impl Recorder {
     pub fn new() -> Self {
         Self {
             slot: Mutex::new(RecordingSlot::default()),
+            executable: std::env::current_exe().ok().map(ExecutableIdentity::read),
         }
     }
 
@@ -128,11 +340,47 @@ impl Recorder {
             "System audio capture requires macOS 14.2 or newer",
         ));
 
+        let result = result.map(|mut files: RecordingFiles| {
+            if let Some(health) = files.health.as_mut() {
+                health.set_identity_changed(self.identity_changed());
+            }
+            files
+        });
         let release_result = slot.release(session_id);
         match (result, release_result) {
             (Ok(path), Ok(())) => Ok(path),
             (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         }
+    }
+
+    pub fn health(&self, session_id: &str) -> AppResult<RecordingHealth> {
+        let slot = self.lock_slot()?;
+        if slot.session_id.as_deref() != Some(session_id) {
+            return Err(AppError::new(
+                "recording_session_mismatch",
+                "Recording belongs to a different session",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let recording = slot.recording.as_ref().ok_or_else(|| {
+                AppError::new("recorder_state", "Recording resources are missing")
+            })?;
+            let mut health = recording.health()?;
+            health.set_identity_changed(self.identity_changed());
+            Ok(health)
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(AppError::new(
+            "audio_capture_unsupported",
+            "System audio capture requires macOS 14.2 or newer",
+        ))
+    }
+
+    fn identity_changed(&self) -> bool {
+        self.executable
+            .as_ref()
+            .is_some_and(ExecutableIdentity::changed)
     }
 
     pub fn is_recording(&self) -> bool {
@@ -156,12 +404,12 @@ impl Default for Recorder {
 }
 
 #[cfg(target_os = "macos")]
-mod native {
+pub(crate) mod native {
     use std::{
         ffi::{c_void, CStr},
         path::{Path, PathBuf},
         ptr::{self, NonNull},
-        sync::atomic::{AtomicI32, AtomicUsize, Ordering},
+        sync::atomic::{AtomicUsize, Ordering},
         thread,
         time::Duration,
     };
@@ -197,13 +445,67 @@ mod native {
 
     use crate::{
         domain::{AppError, AppResult},
-        recorder::RecordingFiles,
+        recorder::{RecordingFiles, RecordingHealth, SourceCounters, SourceHealth},
     };
 
     const NO_ERR: i32 = 0;
     const AAC_BIT_RATE: u32 = 24_000;
     const AUDIO_PERMISSION_DENIED: i32 = -66748;
     const CALLBACK_GATE_CLOSED: usize = 1 << (usize::BITS - 1);
+
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct MachTimebase {
+        numer: u32,
+        denom: u32,
+    }
+
+    unsafe extern "C" {
+        fn mach_timebase_info(info: *mut MachTimebase) -> i32;
+        fn mach_continuous_time() -> u64;
+    }
+
+    #[derive(Clone, Copy)]
+    struct ContinuousClock {
+        started_ticks: u64,
+        timebase: MachTimebase,
+    }
+
+    impl ContinuousClock {
+        fn new() -> AppResult<Self> {
+            let mut timebase = MachTimebase { numer: 0, denom: 0 };
+            // SAFETY: timebase has the layout and writable size required by Mach.
+            check_status("mach_timebase_info", unsafe {
+                mach_timebase_info(&mut timebase)
+            })?;
+            if timebase.numer == 0 || timebase.denom == 0 {
+                return Err(AppError::new(
+                    "audio_capture",
+                    "macOS returned an invalid capture clock timebase",
+                ));
+            }
+            // SAFETY: this clock read takes no pointers and is supported on macOS 10.12+.
+            Ok(Self {
+                started_ticks: unsafe { mach_continuous_time() },
+                timebase,
+            })
+        }
+
+        fn elapsed(&self) -> Duration {
+            // Rust Instant uses CLOCK_UPTIME_RAW on macOS and excludes system sleep.
+            // Continuous Mach time includes sleep, preserving gaps in wall duration and
+            // callback age. Cache the timebase before capture so callbacks only read time.
+            // SAFETY: this clock read takes no pointers; it does not allocate or take locks.
+            self.elapsed_at(unsafe { mach_continuous_time() })
+        }
+
+        fn elapsed_at(&self, ticks: u64) -> Duration {
+            let nanos = u128::from(ticks.saturating_sub(self.started_ticks))
+                * u128::from(self.timebase.numer)
+                / u128::from(self.timebase.denom);
+            Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
+        }
+    }
 
     pub(super) struct NativeRecording {
         path: PathBuf,
@@ -219,6 +521,7 @@ mod native {
         microphone_file: ExtAudioFileRef,
         microphone_callback: Option<Box<CallbackState>>,
         microphone_started: bool,
+        started_at: ContinuousClock,
     }
 
     // SAFETY: ownership moves only under Recorder's mutex. Core Audio accesses CallbackState
@@ -229,10 +532,12 @@ mod native {
         file: ExtAudioFileRef,
         bytes_per_frame: u32,
         gate: CallbackGate,
-        write_status: AtomicI32,
+        counters: SourceCounters,
+        sample_rate: f64,
+        started_at: ContinuousClock,
     }
 
-    // SAFETY: file and bytes_per_frame are immutable during capture; gate/write_status are
+    // SAFETY: file, format, and start time are immutable during capture; gate/counters are
     // atomic, and ExtAudioFileWriteAsync is explicitly supported from real-time callbacks.
     unsafe impl Send for CallbackState {}
     unsafe impl Sync for CallbackState {}
@@ -302,6 +607,7 @@ mod native {
                 microphone_file: ptr::null_mut(),
                 microphone_callback: None,
                 microphone_started: false,
+                started_at: ContinuousClock::new()?,
             };
 
             // SAFETY: setup owns every returned resource and records it immediately so any later
@@ -316,15 +622,39 @@ mod native {
 
         pub(super) fn stop(mut self) -> AppResult<RecordingFiles> {
             // SAFETY: this value exclusively owns the registered IOProc and all handles below.
-            let errors = unsafe { self.cleanup() };
-            if errors.is_empty() {
-                Ok(RecordingFiles {
-                    system: self.path.clone(),
-                    microphone: self.microphone_path.clone(),
-                })
-            } else {
-                Err(combine_errors(errors))
+            let (errors, mut health) = unsafe { self.cleanup() };
+            if let Some(health) = health.as_mut() {
+                health
+                    .warnings
+                    .extend(errors.into_iter().map(|error| error.message));
             }
+            // A failed source or teardown must not discard the other source's usable file.
+            // Post-stop decoding determines which paths contain readable audio.
+            Ok(RecordingFiles {
+                system: self.path.clone(),
+                microphone: self.microphone_path.clone(),
+                health,
+            })
+        }
+
+        pub(super) fn health(&self) -> AppResult<RecordingHealth> {
+            let wall_seconds = self.started_at.elapsed().as_secs_f64();
+            let (Some(system), Some(microphone)) = (&self.callback, &self.microphone_callback)
+            else {
+                return Err(AppError::new(
+                    "recorder_state",
+                    "Recording resources are missing",
+                ));
+            };
+            Ok(RecordingHealth::from_sources(
+                wall_seconds,
+                system
+                    .counters
+                    .snapshot(system.sample_rate, wall_seconds, false),
+                microphone
+                    .counters
+                    .snapshot(microphone.sample_rate, wall_seconds, false),
+            ))
         }
 
         unsafe fn setup(&mut self, path: &Path, microphone_path: &Path) -> AppResult<()> {
@@ -364,7 +694,9 @@ mod native {
                 file: self.file,
                 bytes_per_frame: tap_format.mBytesPerFrame,
                 gate: CallbackGate::default(),
-                write_status: AtomicI32::new(NO_ERR),
+                counters: SourceCounters::default(),
+                sample_rate: tap_format.mSampleRate,
+                started_at: self.started_at,
             }));
             let callback = self.callback.as_mut().expect("callback was just set");
             check_status(
@@ -408,7 +740,9 @@ mod native {
                 file: self.microphone_file,
                 bytes_per_frame: input_format.mBytesPerFrame,
                 gate: CallbackGate::default(),
-                write_status: AtomicI32::new(NO_ERR),
+                counters: SourceCounters::default(),
+                sample_rate: input_format.mSampleRate,
+                started_at: self.started_at,
             }));
             let callback = self
                 .microphone_callback
@@ -439,14 +773,22 @@ mod native {
 
         fn fail(&mut self, error: AppError) -> AppError {
             // SAFETY: setup has stopped and this value still exclusively owns every recorded handle.
-            let mut errors = unsafe { self.cleanup() };
+            let (mut errors, _) = unsafe { self.cleanup() };
             errors.insert(0, error);
             combine_errors(errors)
         }
 
-        unsafe fn cleanup(&mut self) -> Vec<AppError> {
+        unsafe fn cleanup(&mut self) -> (Vec<AppError>, Option<RecordingHealth>) {
+            let wall_seconds = self.started_at.elapsed().as_secs_f64();
+            // Close both gates together so sequential teardown cannot keep one source recording.
+            for callback in [&self.callback, &self.microphone_callback]
+                .into_iter()
+                .flatten()
+            {
+                callback.gate.disable();
+            }
             let mut errors = Vec::new();
-            cleanup_stream(
+            let microphone_health = cleanup_stream(
                 &mut errors,
                 "microphone",
                 self.microphone_device_id,
@@ -454,9 +796,10 @@ mod native {
                 &mut self.microphone_started,
                 &mut self.microphone_file,
                 &mut self.microphone_callback,
+                wall_seconds,
             );
             self.microphone_device_id = 0;
-            cleanup_stream(
+            let system_health = cleanup_stream(
                 &mut errors,
                 "system audio",
                 self.aggregate_id,
@@ -464,6 +807,7 @@ mod native {
                 &mut self.started,
                 &mut self.file,
                 &mut self.callback,
+                wall_seconds,
             );
             if self.aggregate_id != 0 {
                 collect_status(
@@ -481,10 +825,17 @@ mod native {
                 );
                 self.tap_id = 0;
             }
-            errors
+            let health = system_health
+                .zip(microphone_health)
+                .map(|(system, microphone)| {
+                    RecordingHealth::from_sources(wall_seconds, system, microphone)
+                });
+            (errors, health)
         }
     }
 
+    // Native handles remain in their owning recorder; grouping them just for teardown obscures ownership.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn cleanup_stream(
         errors: &mut Vec<AppError>,
         label: &str,
@@ -493,7 +844,8 @@ mod native {
         started: &mut bool,
         file: &mut ExtAudioFileRef,
         callback: &mut Option<Box<CallbackState>>,
-    ) {
+        wall_seconds: f64,
+    ) -> Option<SourceHealth> {
         if let Some(callback) = callback.as_ref() {
             callback.gate.disable();
         }
@@ -521,9 +873,15 @@ mod native {
             collect_status(
                 errors,
                 &format!("ExtAudioFileWriteAsync({label} callback)"),
-                callback.write_status.load(Ordering::Acquire),
+                callback.counters.write_status.load(Ordering::Acquire),
             );
         }
+        // Snapshot only after all admitted callbacks have left, before releasing their state.
+        let health = callback.as_ref().map(|callback| {
+            callback
+                .counters
+                .snapshot(callback.sample_rate, wall_seconds, true)
+        });
         if !file.is_null() {
             collect_status(
                 errors,
@@ -539,6 +897,7 @@ mod native {
         } else {
             *callback = None;
         }
+        health
     }
 
     impl Drop for NativeRecording {
@@ -564,6 +923,9 @@ mod native {
             return NO_ERR;
         };
 
+        state
+            .counters
+            .callback(state.started_at.elapsed().as_millis() as u64);
         let list = input.as_ref();
         let Some(first_buffer) = list.mBuffers.first() else {
             return NO_ERR;
@@ -576,15 +938,9 @@ mod native {
             return NO_ERR;
         }
 
+        state.counters.admit(frames);
         let status = ExtAudioFileWriteAsync(state.file, frames, input.as_ptr());
-        if status != NO_ERR {
-            let _ = state.write_status.compare_exchange(
-                NO_ERR,
-                status,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-        }
+        state.counters.complete_write(frames, status);
         NO_ERR
     }
 
@@ -810,7 +1166,7 @@ mod native {
         }
     }
 
-    fn create_audio_file(
+    pub(crate) fn create_audio_file(
         path: &Path,
         tap_format: &AudioStreamBasicDescription,
     ) -> AppResult<ExtAudioFileRef> {
@@ -889,7 +1245,7 @@ mod native {
         ))
     }
 
-    fn set_client_format(
+    pub(crate) fn set_client_format(
         file: ExtAudioFileRef,
         tap_format: &AudioStreamBasicDescription,
     ) -> AppResult<()> {
@@ -908,7 +1264,7 @@ mod native {
         })
     }
 
-    fn set_bit_rate(file: ExtAudioFileRef) -> AppResult<()> {
+    pub(crate) fn set_bit_rate(file: ExtAudioFileRef) -> AppResult<()> {
         let mut converter: AudioConverterRef = ptr::null_mut();
         let mut size = size_of::<AudioConverterRef>() as u32;
         // SAFETY: file is live and converter/size are valid outputs.
@@ -1081,6 +1437,90 @@ mod native {
         use objc2_core_audio_types::{kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked};
 
         #[test]
+        fn continuous_capture_clock_counts_sleep_in_wall_duration() {
+            let clock = ContinuousClock {
+                started_ticks: 120,
+                timebase: MachTimebase {
+                    numer: 125,
+                    denom: 3,
+                },
+            };
+            // Sixty seconds of active capture plus sixty seconds asleep: continuous ticks
+            // advance by 120 seconds even though the active/uptime clock advances by only 60.
+            let wall = clock.elapsed_at(2_880_000_120);
+            assert_eq!(wall, Duration::from_secs(120));
+            assert_eq!(clock.elapsed_at(123), Duration::from_nanos(125));
+            assert_eq!(clock.elapsed_at(119), Duration::ZERO);
+            let counters = SourceCounters::default();
+            counters.callback(60_000);
+            counters.admit(60 * 48_000);
+            counters.complete_write(60 * 48_000, 0);
+            let live = counters.snapshot(48_000.0, wall.as_secs_f64(), false);
+            assert_eq!(live.status, crate::recorder::CaptureStatus::Stalled);
+            assert_eq!(live.last_callback_age_seconds, Some(60.0));
+            assert_eq!(
+                counters.snapshot(48_000.0, wall.as_secs_f64(), true).status,
+                crate::recorder::CaptureStatus::ShortCapture
+            );
+        }
+
+        #[test]
+        fn continuous_capture_clock_reads_monotonic_native_time() {
+            let clock = ContinuousClock::new().unwrap();
+            assert!(clock.started_ticks > 0);
+            let first = clock.elapsed();
+            let second = clock.elapsed();
+            assert!(second >= first);
+        }
+
+        #[test]
+        fn stop_preserves_healthy_source_when_other_source_failed_to_write() {
+            let started_at = ContinuousClock::new().unwrap();
+            let callback = |status| {
+                let counters = SourceCounters::default();
+                counters.callback(0);
+                counters.admit(48_000);
+                counters.complete_write(48_000, status);
+                Some(Box::new(CallbackState {
+                    file: ptr::null_mut(),
+                    bytes_per_frame: 4,
+                    gate: CallbackGate::default(),
+                    counters,
+                    sample_rate: 48_000.0,
+                    started_at,
+                }))
+            };
+            // No native handles are installed: this exercises final accounting and the error
+            // path without opening a device or recording microphone/system audio.
+            let recording = NativeRecording {
+                path: PathBuf::from("system.m4a"),
+                microphone_path: PathBuf::from("microphone.m4a"),
+                tap_id: 0,
+                aggregate_id: 0,
+                io_proc_id: None,
+                file: ptr::null_mut(),
+                callback: callback(-50),
+                started: false,
+                microphone_device_id: 0,
+                microphone_io_proc_id: None,
+                microphone_file: ptr::null_mut(),
+                microphone_callback: callback(0),
+                microphone_started: false,
+                started_at,
+            };
+            let files = recording.stop().unwrap();
+            assert_eq!(files.microphone, PathBuf::from("microphone.m4a"));
+            let health = files.health.unwrap();
+            assert_eq!(health.system.written_frames, 0);
+            assert_eq!(health.microphone.written_frames, 48_000);
+            assert_eq!(health.system.write_error, Some(-50));
+            assert!(health
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("OSStatus -50")));
+        }
+
+        #[test]
         fn configures_a_supported_aac_bit_rate_on_this_mac() {
             let path = std::env::temp_dir().join(format!(
                 "meeting-notes-aac-compat-{}.m4a",
@@ -1114,6 +1554,145 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_health_counts_only_successfully_written_frames() {
+        let counters = SourceCounters::default();
+        counters.callback(1_000);
+        counters.admit(48_000);
+        counters.complete_write(48_000, 0);
+        counters.admit(24_000);
+        counters.complete_write(24_000, -50);
+        counters.complete_write(0, -51);
+        let health = counters.snapshot(48_000.0, 2.0, false);
+        assert_eq!(health.admitted_frames, 72_000);
+        assert_eq!(health.written_frames, 48_000);
+        assert_eq!(health.captured_seconds, 1.0);
+        assert_eq!(health.last_callback_age_seconds, Some(1.0));
+        assert_eq!(health.write_error, Some(-50));
+        assert_eq!(health.status, CaptureStatus::WriteError);
+    }
+
+    #[test]
+    fn capture_health_warns_for_no_frames_and_stalls_then_recovers() {
+        let counters = SourceCounters::default();
+        assert_eq!(
+            counters.snapshot(48_000.0, 2.0, false).status,
+            CaptureStatus::Starting
+        );
+        assert_eq!(
+            counters.snapshot(48_000.0, 11.0, false).status,
+            CaptureStatus::NoFrames
+        );
+        counters.callback(12_000);
+        counters.admit(48_000);
+        counters.complete_write(48_000, 0);
+        assert_eq!(
+            counters.snapshot(48_000.0, 12.0, false).status,
+            CaptureStatus::Healthy
+        );
+        assert_eq!(
+            counters.snapshot(48_000.0, 23.0, false).status,
+            CaptureStatus::Stalled
+        );
+        counters.callback(24_000);
+        counters.admit(48_000);
+        counters.complete_write(48_000, 0);
+        assert_eq!(
+            counters.snapshot(48_000.0, 24.0, false).status,
+            CaptureStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn capture_health_empty_callbacks_do_not_hide_a_stalled_source() {
+        let counters = SourceCounters::default();
+        counters.callback(1_000);
+        counters.admit(48_000);
+        counters.complete_write(48_000, 0);
+        counters.callback(12_000);
+        counters.complete_write(0, 0);
+        let health = counters.snapshot(48_000.0, 12.0, false);
+        assert_eq!(health.last_callback_age_seconds, Some(0.0));
+        assert_eq!(health.status, CaptureStatus::Stalled);
+    }
+
+    #[test]
+    fn capture_health_keeps_sources_independent_and_warns_about_short_capture() {
+        let system = SourceCounters::default();
+        let microphone = SourceCounters::default();
+        microphone.callback(120_000);
+        microphone.admit(60 * 48_000);
+        microphone.complete_write(60 * 48_000, 0);
+        let health = RecordingHealth::from_sources(
+            120.0,
+            system.snapshot(48_000.0, 120.0, true),
+            microphone.snapshot(48_000.0, 120.0, true),
+        );
+        assert_eq!(health.system.status, CaptureStatus::NoFrames);
+        assert_eq!(health.microphone.status, CaptureStatus::ShortCapture);
+        assert_eq!(health.microphone.captured_seconds, 60.0);
+        assert!(health
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("System audio")));
+        assert!(health
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Microphone")));
+    }
+
+    #[test]
+    fn capture_health_does_not_confuse_silent_frames_with_missing_capture() {
+        let counters = SourceCounters::default();
+        counters.callback(60_000);
+        counters.admit(60 * 48_000);
+        counters.complete_write(60 * 48_000, 0);
+        assert_eq!(
+            counters.snapshot(48_000.0, 60.0, true).status,
+            CaptureStatus::Healthy
+        );
+        assert_eq!(
+            SourceCounters::default()
+                .snapshot(48_000.0, 0.1, true)
+                .status,
+            CaptureStatus::NoFrames
+        );
+    }
+
+    #[test]
+    fn capture_health_checks_real_duration_without_rounding_away_loss() {
+        let counters = SourceCounters::default();
+        counters.callback(4_000);
+        counters.admit(48_000);
+        counters.complete_write(48_000, 0);
+        assert_eq!(
+            counters.snapshot(48_000.0, 4.0, true).status,
+            CaptureStatus::ShortCapture
+        );
+        assert_eq!(
+            counters.snapshot(48_000.0, 1.01, true).status,
+            CaptureStatus::Healthy
+        );
+    }
+
+    #[test]
+    fn executable_identity_detects_replacement_and_disappearance() {
+        let directory =
+            std::env::temp_dir().join(format!("capture-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("app");
+        std::fs::write(&path, b"old").unwrap();
+        let identity = ExecutableIdentity::read(path.clone());
+        assert!(!identity.changed());
+        let replacement = directory.join("new-app");
+        std::fs::write(&replacement, b"new").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(identity.changed());
+        std::fs::remove_file(&path).unwrap();
+        assert!(identity.changed());
+        std::fs::remove_dir(directory).unwrap();
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

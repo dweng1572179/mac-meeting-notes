@@ -12,6 +12,123 @@ use meeting_notes_lib::{
 use serde_json::{json, Value};
 
 #[test]
+fn transcription_rejects_output_limit_instead_of_saving_a_truncated_transcript() {
+    let path =
+        std::env::temp_dir().join(format!("meeting-notes-limit-{}.m4a", uuid::Uuid::new_v4()));
+    std::fs::write(&path, [0, 0, 0, 9, b'm', b'd', b'a', b't', 1]).unwrap();
+    let (base_url, _) = local_server(json_response(
+        200,
+        r#"{"text":"cut off","usage":{"type":"tokens","output_tokens":2000}}"#,
+    ));
+    let result = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url(base_url).transcribe(&path, "test-key"),
+    );
+    assert!(path.exists());
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(result.unwrap_err().code, "transcription_too_long");
+}
+
+#[test]
+fn oversized_upload_is_rejected_locally_and_kept() {
+    let path =
+        std::env::temp_dir().join(format!("meeting-notes-large-{}.m4a", uuid::Uuid::new_v4()));
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(25_000_001).unwrap();
+    let result = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url("http://127.0.0.1:9/v1").transcribe(&path, "test-key"),
+    );
+    assert!(path.exists());
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(result.unwrap_err().code, "audio_too_large");
+}
+
+#[test]
+fn openai_invalid_audio_preserves_reason_and_request_id_without_echoing_private_content() {
+    let body = r#"{"error":{"message":"Audio file might be corrupted or unsupported","type":"invalid_request_error","code":"invalid_value","param":"file"}}"#;
+    let response = json_response(400, body).replacen(
+        "Content-Type:",
+        "x-request-id: req_audio_123\r\nContent-Type:",
+        1,
+    );
+    let (base_url, _) = local_server(response);
+    let error = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url(base_url).validate_key("never-echo-this-key"),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_audio");
+    assert_eq!(
+        error.message,
+        "OpenAI could not read this recording. Your audio was kept. Request ID: req_audio_123"
+    );
+}
+
+#[test]
+fn openai_errors_distinguish_actionable_causes_and_never_echo_response_secrets() {
+    for (status, envelope, expected) in [
+        (
+            401,
+            r#"{"message":"Incorrect API key: sk-secret","code":"invalid_api_key"}"#,
+            "invalid_api_key",
+        ),
+        (
+            403,
+            r#"{"message":"Denied private-project","code":"permission_denied"}"#,
+            "model_access",
+        ),
+        (
+            404,
+            r#"{"code":"model_not_found","param":"model"}"#,
+            "model_access",
+        ),
+        (429, r#"{"code":"insufficient_quota"}"#, "quota_exceeded"),
+        (429, r#"{"code":"rate_limit_exceeded"}"#, "rate_limited"),
+        (
+            400,
+            r#"{"code":"context_length_exceeded"}"#,
+            "input_too_large",
+        ),
+        (413, r#"{}"#, "audio_too_large"),
+        (
+            500,
+            r#"{"message":"sk-secret private-project","code":"server_error"}"#,
+            "openai_server",
+        ),
+    ] {
+        let body = format!("{{\"error\":{envelope}}}");
+        let response = json_response(status, &body).replacen(
+            "Content-Type:",
+            "x-request-id: req_test_456\r\nContent-Type:",
+            1,
+        );
+        let (base_url, _) = local_server(response);
+        let error = tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url(base_url).validate_key("sk-secret"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, expected, "status {status}");
+        assert!(error.message.contains("Request ID: req_test_456"));
+        assert!(!error.message.contains("sk-secret"));
+        assert!(!error.message.contains("private-project"));
+    }
+}
+
+#[test]
+fn non_json_openai_failure_keeps_status_and_network_failure_is_distinct() {
+    let (base_url, _) = local_server(json_response(502, "<html>bad gateway</html>"));
+    let error = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url(base_url).validate_key("test-key"),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "openai_server");
+    assert!(error.message.contains("502"));
+    let error = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url("http://127.0.0.1:9/v1").validate_key("test-key"),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "openai_network");
+}
+
+#[test]
 fn enrichment_request_preserves_dynamic_session_content_at_input_path() {
     let session = session();
 
@@ -284,7 +401,7 @@ fn local_server(response: String) -> (String, Receiver<CapturedRequest>) {
         let (mut stream, _) = listener.accept().unwrap();
         let request = read_request(&mut stream);
         stream.write_all(response.as_bytes()).unwrap();
-        sender.send(request).unwrap();
+        let _ = sender.send(request);
     });
     (format!("http://{address}/v1"), receiver)
 }

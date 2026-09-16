@@ -21,15 +21,27 @@ This check uses labeled synthetic content only. It tests that a later final deci
 [ ] Tentative proceed suggestion not reported as final
 [ ] Final pause decision present
 [ ] Simulation labels retained
-[ ] Meeting audio and You transcript labels contain speech
+[ ] System audio and Microphone transcript labels contain speech with overlapping source offsets
 [ ] Folder question links to an exact meeting excerpt
 [ ] Both raw audio files deleted after transcription
 [ ] Original and Enhanced views survive app restart
 ```
 
-## Current status
+## v0.2.6 automated and live synthetic acceptance
 
-The complete live OpenAI and hardware acceptance run above remains a manual release check because it requires speaking into the selected physical microphone. Automated and synthetic native checks cover the same storage and request boundaries without collecting private meeting content.
+The ignored `live_synthetic_long_recording_with_openai` test generates speech with macOS `say`, encodes AAC using the system audio tool, and invokes the actual native chunking, OpenAI, and atomic persistence pipeline against a disposable local library. It does not record the microphone or use existing meetings. Explicitly run it with paid API access and the existing login Keychain key:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --lib live_synthetic_long_recording_with_openai -- --ignored --nocapture --test-threads=1
+```
+
+Verified on September 16, 2026: 340.4 seconds, two chunks, 1,224 transcript words, correct final decision in enhanced notes, original notes unchanged, completed session reopened, and no retained synthetic audio.
+
+The ordinary offline suite independently decodes all chunks from a 605.25-second source and checks duration/content and upload size. Local HTTP fixtures exercise a failed middle chunk followed by restart and resumed uploads, storage failure before checkpoint, final-checkpoint interruption cleanup, empty system audio, silent microphone, and a corrupt source alongside a healthy one. Frame-counter tests distinguish silence, missing frames, empty callbacks, stalls, write errors and short capture. These tests require no microphone permission or spoken input.
+
+## Physical capture check
+
+The optional physical-device run above checks a particular microphone and output-device setup. Synthetic acceptance covers the long-recording processing and storage boundaries without collecting private meeting content.
 
 The source tree has the following automated evidence:
 

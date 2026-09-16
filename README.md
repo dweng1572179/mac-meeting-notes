@@ -5,7 +5,9 @@ A lightweight macOS meeting notepad that records your microphone and computer au
 ## What it does
 
 - Captures the default microphone and Mac computer audio together without inviting a meeting bot.
-- Sends each audio source to OpenAI for transcription, labels `You` and `Meeting audio`, then enriches the transcript around your original notes.
+- Splits each source into approximately five-minute native AAC chunks, transcribes them sequentially, and enriches the conversation around your original notes. Source labels and recording offsets preserve overlapping tracks without inventing a speaker identity.
+- Saves every completed chunk before deleting its temporary audio. Retry resumes saved progress; dense chunks that reach the model output limit are split further.
+- Shows live missing/stalled-source warnings and separate elapsed/captured durations; retains partial-capture warnings with the meeting.
 - Keeps Original and Enhanced views in a local meeting library that survives app restarts.
 - Organizes meetings with simple local folders and a timeline-style All meetings view.
 - Answers questions across a folder or the latest completed meetings, with clickable exact-source citations.
@@ -34,11 +36,11 @@ Download the final [`Meeting-Notes.dmg`](https://github.com/dweng1572179/mac-mee
 ## First launch
 
 1. Open `Meeting-Notes.dmg` and drag **Meeting Notes** to **Applications**.
-2. If Meeting Notes already exists in Applications, choose **Replace**. Never choose **Keep Both**, which creates duplicate app copies.
+2. **Stop every recording and quit Meeting Notes before replacing or updating it.** If Meeting Notes already exists in Applications, choose **Replace**. Never choose **Keep Both**, which creates duplicate app copies.
 3. Approve the unnotarized beta once. On **macOS 14**, right-click **Meeting Notes**, choose **Open**, then confirm **Open**. On **macOS 15 or later**, first try opening Meeting Notes from Applications and dismiss the warning, then open **System Settings → Privacy & Security → Open Anyway** and confirm opening Meeting Notes.
 4. Add your OpenAI API key in the app's settings. On your first recording, grant both Microphone and System Audio Recording when macOS asks.
 
-Future launches work normally from Applications.
+Future launches work normally from Applications. Updates to this ad-hoc signed beta change its privacy identity and may require granting audio permissions again. The app detects executable replacement while running and warns about possible capture loss; only stable Developer ID signing/notarization can address the underlying identity problem.
 
 ## Build from source
 
@@ -50,10 +52,11 @@ rustup target add aarch64-apple-darwin
 npm test -- --run
 npm run check
 cargo test --manifest-path src-tauri/Cargo.toml
-npm run tauri build -- --target aarch64-apple-darwin
+npm run tauri build -- --target aarch64-apple-darwin --bundles app
+node scripts/package-dmg.mjs "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Meeting Notes.app" Meeting-Notes.dmg
 ```
 
-The DMG is written under `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/`.
+The verified `Meeting-Notes.dmg` is written in the repository root. Packaging uses native `hdiutil` with APFS and checks the app signature inside the mounted image; it avoids metadata changes introduced by the default DMG packaging path on newer macOS versions.
 
 ## Focused evaluation
 
@@ -61,7 +64,7 @@ The repeatable labeled simulation and expected results are in [`docs/evaluation.
 
 ## Storage
 
-Meeting metadata, original notes, transcripts, and enhanced notes are stored locally in the app's macOS application-data directory. Raw audio is retained only when needed for recording, transcription, or retry, and is deleted after successful transcription. Deleting a meeting also deletes its contained retained audio. The API key is stored separately in macOS Keychain.
+Meeting metadata, original notes, transcripts, and enhanced notes are stored locally in the app's macOS application-data directory. Raw source audio is retained until its chunks have been safely checkpointed in the session JSON. Temporary chunk audio is deleted only after that chunk’s transcript is persisted. Failed or interrupted work keeps pending source audio; retry skips completed chunks. A failure between the API response and the durable checkpoint can require that uncheckpointed request again. Deleting a meeting also deletes its contained retained audio. The API key is stored separately in macOS Keychain.
 
 ## Limitations
 
@@ -70,6 +73,27 @@ Meeting metadata, original notes, transcripts, and enhanced notes are stored loc
 - Folders and notes are local to one Mac; there are no accounts, shared workspaces, or team sync.
 - This beta is ad-hoc signed but not notarized. macOS 14 requires a one-time right-click **Open**; macOS 15 or later requires trying the first launch, then **System Settings → Privacy & Security → Open Anyway**.
 - Model output can be incomplete or wrong; review enhanced notes against the Original view.
+
+## Reliability verification
+
+`cargo test --manifest-path src-tauri/Cargo.toml` covers native decoding of more than ten minutes of synthetic audio, independently valid chunks below the upload limit, middle-chunk API failure/reopen/retry, storage failures, empty and silent sources, source health, and exact safe OpenAI errors with request IDs. No microphone speech is needed.
+
+An opt-in live test uses macOS `say`, the app’s existing login Keychain entry, and paid OpenAI access. It uses only generated simulation content and cleans its temporary library:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --lib live_synthetic_long_recording_with_openai -- --ignored --nocapture --test-threads=1
+```
+
+Chunk offsets describe recorded audio, not guaranteed wall-clock timing through capture gaps. The app cannot reconstruct audio that macOS did not deliver. Silence is different from missing frames; health counters do not prove speech was audible. Persistent no-frame warnings can also mean there is no system audio playing.
+
+## Roadmap
+
+- Full transcript view with search and copy.
+- Ask-a-meeting and broader ask-all-meetings retrieval beyond the current bounded library questions.
+- Speaker diarization and optional Zoom/Teams participant-name association.
+- Optional screen-share or visual context.
+- Workspace organization and polish.
+- Stable Developer ID signing and notarization when a signing identity is available.
 
 ## License
 

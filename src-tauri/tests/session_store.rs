@@ -461,3 +461,47 @@ fn delete_rejects_an_audio_directory_symlinked_outside_app_data() {
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(outside).unwrap();
 }
+
+#[test]
+fn malformed_chunk_progress_is_rejected_before_it_can_drive_cleanup_or_retry() {
+    use meeting_notes_lib::domain::{AudioSource, SourceTranscript, TranscriptChunk};
+    for (start, duration, duplicate) in [
+        (-1.0, 1.0, false),
+        (0.0, 0.0, false),
+        (0.0, 301.0, false),
+        (1.0, 1.0, false),
+        (0.0, 1.0, true),
+    ] {
+        let root =
+            std::env::temp_dir().join(format!("meeting-notes-progress-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::new(root.clone());
+        let mut session = Session::new(CreateSessionInput {
+            title: "Synthetic".into(),
+            context: String::new(),
+            attendees: vec![],
+        });
+        let track = SourceTranscript {
+            source: AudioSource::System,
+            chunks: vec![TranscriptChunk {
+                start_seconds: start,
+                duration_seconds: duration,
+                transcript: Some("saved".into()),
+            }],
+        };
+        session.transcription = vec![track.clone()];
+        if duplicate {
+            session.transcription.push(track);
+        }
+        let save = store.save(&session);
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        std::fs::write(
+            root.join("sessions").join(format!("{}.json", session.id)),
+            serde_json::to_vec(&session).unwrap(),
+        )
+        .unwrap();
+        let reopened = store.get(&session.id);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(save.unwrap_err().code, "invalid_transcription");
+        assert_eq!(reopened.unwrap_err().code, "invalid_transcription");
+    }
+}
