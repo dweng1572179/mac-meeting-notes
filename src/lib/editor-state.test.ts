@@ -21,9 +21,18 @@ describe('elapsedRecordingSeconds', () => {
 
 describe('captureErrorMessage', () => {
   it('points microphone failures to the microphone privacy setting', () => {
-    expect(captureErrorMessage({ code: 'microphone_capture', message: 'Permission denied' })).toContain(
+    expect(captureErrorMessage({ code: 'microphone_permission', message: 'Permission denied' })).toContain(
       'Privacy & Security → Microphone'
     );
+  });
+
+  it('does not mislabel a microphone codec failure as a privacy failure', () => {
+    expect(
+      captureErrorMessage({
+        code: 'microphone_capture',
+        message: 'AudioConverterSetProperty failed with OSStatus 560226676'
+      })
+    ).not.toContain('Privacy & Security');
   });
 
   it('points system-audio permission failures to the system-audio privacy setting', () => {

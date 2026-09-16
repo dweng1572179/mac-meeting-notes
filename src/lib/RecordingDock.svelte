@@ -11,7 +11,7 @@
           ? error.message
           : 'The action could not be completed.';
     const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
-    if (code === 'microphone_capture') {
+    if (code === 'microphone_permission') {
       return `${detail} Open System Settings → Privacy & Security → Microphone, enable Meeting Notes, then try again.`;
     }
     return code === 'audio_permission'

@@ -1010,8 +1010,15 @@ mod native {
         )
     }
 
-    fn microphone_error(error: AppError) -> AppError {
-        AppError::new("microphone_capture", error.message)
+    pub(super) fn microphone_error(error: AppError) -> AppError {
+        AppError::new(
+            if error.code == "audio_permission" {
+                "microphone_permission"
+            } else {
+                "microphone_capture"
+            },
+            error.message,
+        )
     }
 
     pub(super) fn combine_errors(errors: Vec<AppError>) -> AppError {
@@ -1137,6 +1144,19 @@ mod tests {
         )]);
 
         assert_eq!(error.code, "microphone_capture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn microphone_errors_only_use_permission_guidance_for_permission_denials() {
+        assert_eq!(
+            native::microphone_error(AppError::new("audio_permission", "denied")).code,
+            "microphone_permission"
+        );
+        assert_eq!(
+            native::microphone_error(AppError::new("audio_capture", "codec failed")).code,
+            "microphone_capture"
+        );
     }
 
     #[cfg(target_os = "macos")]
