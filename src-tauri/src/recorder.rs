@@ -174,11 +174,10 @@ mod native {
     use objc2_core_audio::{
         kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceNameKey,
         kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
-        kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyStreams,
-        kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioAggregateDeviceUIDKey, kAudioDevicePropertyStreams,
+        kAudioHardwarePropertyDefaultInputDevice,
         kAudioHardwarePropertyTranslatePIDToProcessObject, kAudioObjectPropertyElementMain,
-        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
-        kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput, kAudioObjectSystemObject,
         kAudioStreamPropertyVirtualFormat, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
         AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID,
         AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
@@ -190,7 +189,7 @@ mod native {
         kAudioFormatLinearPCM, kAudioFormatMPEG4AAC, AudioBufferList, AudioStreamBasicDescription,
         AudioTimeStamp,
     };
-    use objc2_core_foundation::{CFDictionary, CFRetained, CFString, CFURL};
+    use objc2_core_foundation::{CFDictionary, CFURL};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
 
     use crate::{
@@ -199,7 +198,7 @@ mod native {
     };
 
     const NO_ERR: i32 = 0;
-    const AAC_BIT_RATE: u32 = 48_000;
+    const AAC_BIT_RATE: u32 = 24_000;
     const CALLBACK_GATE_CLOSED: usize = 1 << (usize::BITS - 1);
 
     pub(super) struct NativeRecording {
@@ -325,22 +324,7 @@ mod native {
         }
 
         unsafe fn setup(&mut self, path: &Path, microphone_path: &Path) -> AppResult<()> {
-            let (device_uid, stream_index) = default_output_stream()?;
-            let process_id = process_audio_object()?;
-            let processes = object_ids_to_nsarray(&[process_id]);
-            let device_uid = NSString::from_str(&device_uid);
-            let description = CATapDescription::initExcludingProcesses_andDeviceUID_withStream(
-                CATapDescription::alloc(),
-                &processes,
-                &device_uid,
-                stream_index,
-            );
-            description.setName(&NSString::from_str("Meeting Notes system audio"));
-            description.setPrivate(true);
-            description.setMuteBehavior(CATapMuteBehavior::Unmuted);
-            description.setExclusive(true);
-            description.setMixdown(true);
-            description.setMono(true);
+            let description = system_tap_description(process_audio_object()?);
             let tap_uid = description.UUID().UUIDString();
 
             check_status(
@@ -599,30 +583,21 @@ mod native {
         NO_ERR
     }
 
-    fn default_output_stream() -> AppResult<(String, isize)> {
-        let device = read_scalar::<AudioObjectID>(
-            kAudioObjectSystemObject as AudioObjectID,
-            property_address(
-                kAudioHardwarePropertyDefaultOutputDevice,
-                kAudioObjectPropertyScopeGlobal,
-            ),
-            "AudioObjectGetPropertyData(default output device)",
-            None,
-        )?;
-        if device == 0 {
-            return Err(AppError::new(
-                "audio_capture",
-                "Core Audio returned no default output device",
-            ));
+    pub(super) fn system_tap_description(process_id: AudioObjectID) -> Retained<CATapDescription> {
+        let processes = object_ids_to_nsarray(&[process_id]);
+        // SAFETY: the retained NSArray contains valid Core Audio process object IDs.
+        let description = unsafe {
+            CATapDescription::initMonoGlobalTapButExcludeProcesses(
+                CATapDescription::alloc(),
+                &processes,
+            )
+        };
+        unsafe {
+            description.setName(&NSString::from_str("Meeting Notes system audio"));
+            description.setPrivate(true);
+            description.setMuteBehavior(CATapMuteBehavior::Unmuted);
         }
-        let streams = device_streams(device, kAudioObjectPropertyScopeOutput, "output")?;
-        if streams.first().copied().unwrap_or(0) == 0 {
-            return Err(AppError::new(
-                "audio_capture",
-                "Default output device returned an invalid output stream",
-            ));
-        }
-        Ok((read_device_uid(device)?, 0))
+        description
     }
 
     fn default_input_stream() -> AppResult<(AudioObjectID, AudioStreamBasicDescription)> {
@@ -735,37 +710,6 @@ mod native {
         } else {
             Ok(object)
         }
-    }
-
-    fn read_device_uid(device: AudioObjectID) -> AppResult<String> {
-        let address = property_address(
-            kAudioDevicePropertyDeviceUID,
-            kAudioObjectPropertyScopeGlobal,
-        );
-        let mut uid = ptr::null::<CFString>();
-        let mut size = size_of::<*const CFString>() as u32;
-        // SAFETY: uid receives one retained CFString pointer; all other pointers are valid locals.
-        check_status(
-            "AudioObjectGetPropertyData(default output device UID)",
-            unsafe {
-                AudioObjectGetPropertyData(
-                    device,
-                    NonNull::from(&address),
-                    0,
-                    ptr::null(),
-                    NonNull::from(&mut size),
-                    NonNull::new_unchecked((&mut uid as *mut *const CFString).cast()),
-                )
-            },
-        )?;
-        let uid = NonNull::new(uid.cast_mut()).ok_or_else(|| {
-            AppError::new(
-                "audio_capture",
-                "Default output device returned no device UID",
-            )
-        })?;
-        // SAFETY: Core Audio's CFString property follows the Create/Copy ownership convention.
-        Ok(unsafe { CFRetained::from_raw(uid) }.to_string())
     }
 
     fn read_tap_format(tap_id: AudioObjectID) -> AppResult<AudioStreamBasicDescription> {
@@ -1017,6 +961,14 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_audio_tap_is_not_pinned_to_one_output_device() {
+        let description = native::system_tap_description(42);
+
+        assert!(unsafe { description.deviceUID() }.is_none());
+    }
 
     #[test]
     fn a_second_session_cannot_steal_the_recorder() {
