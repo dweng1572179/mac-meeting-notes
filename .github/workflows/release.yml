@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v0.2.3']
+    tags: ['v0.2.4']
 
 permissions:
   contents: write
@@ -25,12 +25,12 @@ jobs:
         run: |
           mount_dir=$(mktemp -d)
           trap 'hdiutil detach "$mount_dir"' EXIT
-          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.3_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
+          hdiutil attach "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.4_aarch64.dmg" -readonly -nobrowse -mountpoint "$mount_dir"
           codesign --verify --deep --strict --verbose=4 "$mount_dir/Meeting Notes.app"
-      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.3_aarch64.dmg" Meeting-Notes.dmg
+      - run: mv "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Meeting Notes_0.2.4_aarch64.dmg" Meeting-Notes.dmg
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
           --title "Meeting Notes $GITHUB_REF_NAME"
-          --notes "Fixes AAC startup failures by selecting a bit rate supported by the Mac's native converter. Only actual system-audio permission denials now show privacy-setting guidance. Ad-hoc signed beta: replace any existing Meeting Notes app rather than keeping both."
+          --notes "Fixes zero-length computer-audio recordings by waiting for Core Audio's private aggregate device to become ready before capture starts. System audio remains independent of speaker volume and mute. Ad-hoc signed beta: replace any existing Meeting Notes app rather than keeping both."
         env:
           GH_TOKEN: ${{ github.token }}

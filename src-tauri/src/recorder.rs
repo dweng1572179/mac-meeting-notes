@@ -162,6 +162,8 @@ mod native {
         path::{Path, PathBuf},
         ptr::{self, NonNull},
         sync::atomic::{AtomicI32, AtomicUsize, Ordering},
+        thread,
+        time::Duration,
     };
 
     use objc2::{rc::Retained, AnyThread};
@@ -175,8 +177,8 @@ mod native {
     use objc2_core_audio::{
         kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceNameKey,
         kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey,
-        kAudioAggregateDeviceUIDKey, kAudioDevicePropertyStreams,
-        kAudioHardwarePropertyDefaultInputDevice,
+        kAudioAggregateDeviceUIDKey, kAudioDevicePropertyDeviceIsAlive,
+        kAudioDevicePropertyStreams, kAudioHardwarePropertyDefaultInputDevice,
         kAudioHardwarePropertyTranslatePIDToProcessObject, kAudioObjectPropertyElementMain,
         kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput, kAudioObjectSystemObject,
         kAudioStreamPropertyVirtualFormat, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
@@ -349,6 +351,7 @@ mod native {
             }
 
             self.aggregate_id = create_aggregate_device(&tap_uid)?;
+            wait_for_aggregate_device(self.aggregate_id)?;
             self.file = create_audio_file(path, &tap_format)?;
             set_client_format(self.file, &tap_format)?;
             set_bit_rate(self.file)?;
@@ -850,6 +853,42 @@ mod native {
         }
     }
 
+    fn wait_for_aggregate_device(device: AudioObjectID) -> AppResult<()> {
+        wait_until_aggregate_ready(
+            || {
+                read_scalar::<u32>(
+                    device,
+                    property_address(
+                        kAudioDevicePropertyDeviceIsAlive,
+                        kAudioObjectPropertyScopeGlobal,
+                    ),
+                    "AudioObjectGetPropertyData(aggregate device alive)",
+                    None,
+                )
+            },
+            Duration::from_millis(100),
+        )
+    }
+
+    pub(super) fn wait_until_aggregate_ready<F>(
+        mut read_alive: F,
+        retry_delay: Duration,
+    ) -> AppResult<()>
+    where
+        F: FnMut() -> AppResult<u32>,
+    {
+        for _ in 0..30 {
+            if matches!(read_alive(), Ok(alive) if alive != 0) {
+                return Ok(());
+            }
+            thread::sleep(retry_delay);
+        }
+        Err(AppError::new(
+            "audio_capture",
+            "Core Audio capture device did not become ready",
+        ))
+    }
+
     fn set_client_format(
         file: ExtAudioFileRef,
         tap_format: &AudioStreamBasicDescription,
@@ -1189,5 +1228,22 @@ mod tests {
             native::status_error("capture", 560226676).code,
             "audio_capture"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_waits_until_the_aggregate_device_reports_alive() {
+        let mut reads = 0;
+
+        native::wait_until_aggregate_ready(
+            || {
+                reads += 1;
+                Ok(u32::from(reads == 3))
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(reads, 3);
     }
 }
