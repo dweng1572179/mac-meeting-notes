@@ -1,6 +1,6 @@
 # Long recording hardening
 
-Approved scope: autonomous v0.2.6 reliability release, existing isolated worktree only.
+Approved scope: autonomous v0.2.7 reliability release, existing isolated worktree only.
 
 - [x] Reproduce 400 JSON error/request-ID loss with a local HTTP contract test. Parse safe error categories across all OpenAI callers; distinguish network and timeout failures.
 - [x] Decode post-stop audio with native ExtendedAudioFile APIs and write independently finalized five-minute mono AAC chunks, bounded below 25 MB. Test real synthetic audio through the codec and independently decode every output.
