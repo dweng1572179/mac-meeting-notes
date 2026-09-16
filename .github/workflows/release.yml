@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v0.2.6']
+    tags: ['v0.2.7']
 
 permissions:
   contents: write
@@ -21,7 +21,7 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: npm run tauri build -- --target aarch64-apple-darwin --bundles app
-      - run: node scripts/package-dmg.test.mjs "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Meeting Notes.app"
+      - run: node scripts/check-package-dmg.mjs "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Meeting Notes.app"
       - run: node scripts/package-dmg.mjs "src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Meeting Notes.app" Meeting-Notes.dmg
       - name: Verify packaged app signature
         run: |
@@ -35,6 +35,6 @@ jobs:
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
           --title "Meeting Notes $GITHUB_REF_NAME"
-          --notes-file docs/releases/v0.2.6.md
+          --notes-file docs/releases/v0.2.7.md
         env:
           GH_TOKEN: ${{ github.token }}

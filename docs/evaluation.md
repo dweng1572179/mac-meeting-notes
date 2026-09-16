@@ -27,7 +27,7 @@ This check uses labeled synthetic content only. It tests that a later final deci
 [ ] Original and Enhanced views survive app restart
 ```
 
-## v0.2.6 automated and live synthetic acceptance
+## v0.2.7 automated and live synthetic acceptance
 
 The ignored `live_synthetic_long_recording_with_openai` test generates speech with macOS `say`, encodes AAC using the system audio tool, and invokes the actual native chunking, OpenAI, and atomic persistence pipeline against a disposable local library. It does not record the microphone or use existing meetings. Explicitly run it with paid API access and the existing login Keychain key:
 
