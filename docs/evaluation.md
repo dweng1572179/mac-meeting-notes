@@ -182,3 +182,14 @@ Regression tests first reproduced repeated chunk headings, long unbroken text, a
 Synthetic browser checks at 1180, 900, and 720 pixels verified a single wrapper focus border with no textarea outline/resize handle, no horizontal overflow, growing long questions, Command+Enter, duplicate-submit protection, a retained question after a failed request, successful retry/clear, safe emphasis rendering, expandable exact sources, and phrase matches across display breaks. No real meeting text was used in these checks. The mechanical design scan found only existing global font/capture-warning styling; the patch preserves the established app theme and capture warning.
 
 Final local verification passed 62 frontend tests, zero Svelte errors/warnings, the production frontend build, and whitespace checks. No audio processing changed and no paid API test was repeated for this presentation patch. Release/installation results are recorded separately after they run.
+
+
+### v0.4.1 release and installed artifact
+
+[Release run 35286400748](https://github.com/dweng1572179/mac-meeting-notes/actions/runs/35286400748) passed all frontend tests/type checks, Rust tests, Clippy, the optimized macOS build, packaging regression, and mounted-app signature verification. [v0.4.1](https://github.com/dweng1572179/mac-meeting-notes/releases/tag/v0.4.1) points to `18f7cf25fffd65d47b50de2837fe42ac7add9251`.
+
+The public DMG is 6,148,357 bytes with SHA-256 `c0ad31a96af20f3d482f8a41eb888ca8372fa0ec61866026f409e506c89ab9ef`. Its local digest matched GitHub, and the read-only mounted app passed strict deep signature, version, and audio-input entitlement checks. Installation followed a fresh inactive-recording check and graceful quit. Every installed bundle file matched the release; executable SHA-256 is `160fc3a4354b7d1256fae2d17c4c3e194813fdd12642e14a2f175019fce19c3a`.
+
+Both existing meeting files remained byte-for-byte unchanged. Build caches, verification browser/server, synthetic harness, screenshots, mount, and rollback bundle were cleaned. One verified DMG remains in Downloads.
+
+The installed window launched, but the native UI check is pending the user's macOS Keychain approval. A targeted process sample confirmed bootstrap waiting in `SecKeychainFindGenericPassword`; inspection timed out. Browser UI verification passed as recorded above, but native UI verification is not marked passed. No credentials or Keychain access settings were changed by the agent.
