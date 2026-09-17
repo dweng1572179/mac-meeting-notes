@@ -2,6 +2,51 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionSettings {
+    pub language: String,
+    pub vocabulary: String,
+    pub model: String,
+}
+
+impl Default for TranscriptionSettings {
+    fn default() -> Self {
+        Self {
+            language: String::new(),
+            vocabulary: String::new(),
+            model: "gpt-4o-mini-transcribe".into(),
+        }
+    }
+}
+
+impl TranscriptionSettings {
+    pub fn validate(&self) -> AppResult<()> {
+        if !(self.language.is_empty()
+            || (self.language.len() == 2
+                && self.language.bytes().all(|byte| byte.is_ascii_lowercase())))
+        {
+            return Err(AppError::new("invalid_transcription_settings", "Language must be empty for automatic detection or a two-letter lowercase language code."));
+        }
+        if self.vocabulary.chars().count() > 2000 {
+            return Err(AppError::new(
+                "invalid_transcription_settings",
+                "Vocabulary must contain at most 2000 characters.",
+            ));
+        }
+        if !matches!(
+            self.model.as_str(),
+            "gpt-4o-mini-transcribe" | "gpt-4o-transcribe"
+        ) {
+            return Err(AppError::new(
+                "invalid_transcription_settings",
+                "Choose a supported transcription model.",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionInput {
@@ -42,6 +87,8 @@ pub struct Session {
     pub microphone_audio_path: Option<String>,
     #[serde(default)]
     pub transcription: Vec<SourceTranscript>,
+    #[serde(default)]
+    pub transcription_settings: TranscriptionSettings,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default)]
@@ -150,6 +197,7 @@ impl Session {
             audio_path: None,
             microphone_audio_path: None,
             transcription: Vec::new(),
+            transcription_settings: TranscriptionSettings::default(),
             warnings: Vec::new(),
             capture_health: None,
         }

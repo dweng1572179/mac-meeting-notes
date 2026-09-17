@@ -505,3 +505,63 @@ fn malformed_chunk_progress_is_rejected_before_it_can_drive_cleanup_or_retry() {
         assert_eq!(reopened.unwrap_err().code, "invalid_transcription");
     }
 }
+
+#[test]
+fn product_settings_roundtrip_validation_and_old_session_default() {
+    use meeting_notes_lib::domain::TranscriptionSettings;
+    let root = std::env::temp_dir().join(format!("settings-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    assert_eq!(store.settings().unwrap(), TranscriptionSettings::default());
+    let settings = TranscriptionSettings {
+        language: "en".into(),
+        vocabulary: "界".repeat(2000),
+        model: "gpt-4o-transcribe".into(),
+    };
+    store.save_settings(&settings).unwrap();
+    assert_eq!(
+        SessionStore::new(root.clone()).settings().unwrap(),
+        settings
+    );
+    for invalid in [
+        TranscriptionSettings {
+            vocabulary: "界".repeat(2001),
+            ..settings.clone()
+        },
+        TranscriptionSettings {
+            model: "anything".into(),
+            ..settings.clone()
+        },
+        TranscriptionSettings {
+            language: "english".into(),
+            ..settings.clone()
+        },
+    ] {
+        assert_eq!(
+            store.save_settings(&invalid).unwrap_err().code,
+            "invalid_transcription_settings"
+        );
+        assert_eq!(store.settings().unwrap(), settings);
+    }
+    let session = Session::new(CreateSessionInput {
+        title: "old".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    let mut json = serde_json::to_value(session).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("transcriptionSettings");
+    let old: Session = serde_json::from_value(json).unwrap();
+    assert_eq!(old.transcription_settings, TranscriptionSettings::default());
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(root.join("settings.json")).unwrap();
+        let victim = root.join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, root.join("settings.json")).unwrap();
+        assert!(store.save_settings(&settings).is_err());
+        assert!(store.settings().is_err());
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "untouched");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

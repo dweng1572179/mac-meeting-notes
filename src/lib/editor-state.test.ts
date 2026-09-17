@@ -10,6 +10,10 @@ describe('nextMeetingView', () => {
   it('reveals Enhanced after untouched processing completes', () => {
     expect(nextMeetingView('original', 'processing', 'complete', false)).toBe('enhanced');
   });
+
+  it('keeps the transcript visible when processing finishes', () => {
+    expect(nextMeetingView('transcript', 'processing', 'complete', false)).toBe('transcript');
+  });
 });
 
 describe('elapsedRecordingSeconds', () => {

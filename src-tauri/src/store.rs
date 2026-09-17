@@ -6,7 +6,7 @@ use std::{
 
 use chrono::{DateTime, FixedOffset};
 
-use crate::domain::{AppError, AppResult, AudioSource, Session};
+use crate::domain::{AppError, AppResult, AudioSource, Session, TranscriptionSettings};
 
 pub struct SessionStore {
     root: PathBuf,
@@ -59,22 +59,28 @@ impl SessionStore {
         let directory = self.sessions_dir()?;
         let json = serde_json::to_vec_pretty(session).map_err(json_error)?;
         let path = directory.join(format!("{}.json", session.id));
-        let temporary_path = directory.join(format!("{}.json.tmp", session.id));
-        validate_file(&path)?;
-        let temporary_exists = validate_file(&temporary_path)?;
-        fs::create_dir_all(&directory).map_err(io_error)?;
-        if temporary_exists {
-            fs::remove_file(&temporary_path).map_err(io_error)?;
+        atomic_write(&path, &json)
+    }
+
+    pub fn settings(&self) -> AppResult<TranscriptionSettings> {
+        validate_directory(&self.root)?;
+        let path = self.root.join("settings.json");
+        if !validate_file(&path)? {
+            return Ok(TranscriptionSettings::default());
         }
-        let mut temporary = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .map_err(io_error)?;
-        temporary.write_all(&json).map_err(io_error)?;
-        temporary.sync_all().map_err(io_error)?;
-        fs::rename(temporary_path, path).map_err(io_error)?;
-        sync_directory(&directory)
+        let settings: TranscriptionSettings =
+            serde_json::from_slice(&fs::read(path).map_err(io_error)?).map_err(json_error)?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    pub fn save_settings(&self, settings: &TranscriptionSettings) -> AppResult<()> {
+        settings.validate()?;
+        validate_directory(&self.root)?;
+        atomic_write(
+            &self.root.join("settings.json"),
+            &serde_json::to_vec_pretty(settings).map_err(json_error)?,
+        )
     }
 
     pub fn delete(&self, id: &str) -> AppResult<()> {
@@ -240,6 +246,7 @@ impl SessionStore {
 }
 
 fn validate_transcription(session: &Session) -> AppResult<()> {
+    session.transcription_settings.validate()?;
     let invalid = || {
         AppError::new(
             "invalid_transcription",
@@ -267,6 +274,27 @@ fn validate_transcription(session: &Session) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+fn atomic_write(path: &Path, json: &[u8]) -> AppResult<()> {
+    let directory = path.parent().expect("app data file parent");
+    validate_directory(directory)?;
+    let temporary_path = path.with_extension("json.tmp");
+    validate_file(path)?;
+    let temporary_exists = validate_file(&temporary_path)?;
+    fs::create_dir_all(directory).map_err(io_error)?;
+    if temporary_exists {
+        fs::remove_file(&temporary_path).map_err(io_error)?;
+    }
+    let mut temporary = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+        .map_err(io_error)?;
+    temporary.write_all(json).map_err(io_error)?;
+    temporary.sync_all().map_err(io_error)?;
+    fs::rename(temporary_path, path).map_err(io_error)?;
+    sync_directory(directory)
 }
 
 fn validate_directory(path: &Path) -> AppResult<()> {

@@ -8,9 +8,13 @@ A lightweight macOS meeting notepad that records your microphone and computer au
 - Splits each source into approximately five-minute native AAC chunks, transcribes them sequentially, and enriches the conversation around your original notes. Source labels and recording offsets preserve overlapping tracks without inventing a speaker identity.
 - Saves every completed chunk before deleting its temporary audio. Retry resumes saved progress; dense chunks that reach the model output limit are split further.
 - Shows live missing/stalled-source warnings and separate elapsed/captured durations; retains partial-capture warnings with the meeting.
-- Keeps Original and Enhanced views in a local meeting library that survives app restarts.
+- Keeps Original, Enhanced, and searchable Transcript views in a local meeting library that survives app restarts. Partial transcripts stay visible when processing fails.
+- Exports a complete Markdown copy to Downloads, including original notes, transcript, context, and capture warnings; incomplete processing is clearly labeled.
+- Saves transcription language, names/vocabulary, and an optional higher-accuracy model. Standard lower-cost transcription remains the default.
 - Organizes meetings with simple local folders and a timeline-style All meetings view.
-- Answers questions across a folder or the latest completed meetings, with clickable exact-source citations.
+- Answers questions about one meeting, a folder, or the latest completed meetings, with exact-source citations. Questions include the complete saved source text within an explicit size budget; oversized selections produce a clear error instead of silently dropping later decisions.
+- Searches titles, attendees, folders, original notes, enhanced notes, and transcripts; accented names can be found without typing accent marks.
+- Offers specific recovery actions for missing keys, interrupted transcription, enrichment failures, and no-speech recordings. Saved progress and typed notes stay intact.
 - Deletes raw audio after successful transcription. Failed transcription can retain audio locally so you can retry.
 
 ## Privacy
@@ -42,6 +46,14 @@ Download the final [`Meeting-Notes.dmg`](https://github.com/dweng1572179/mac-mee
 
 Future launches work normally from Applications. Updates to this ad-hoc signed beta change its privacy identity and may require granting audio permissions again. The app detects executable replacement while running and warns about possible capture loss; only stable Developer ID signing/notarization can address the underlying identity problem.
 
+## Language, accents, and terminology
+
+Open **Settings → Transcription** to choose automatic detection or a spoken language, add names and terminology (up to 2,000 characters), and select Standard (`gpt-4o-mini-transcribe`) or Higher accuracy (`gpt-4o-transcribe`). The latter costs more through your own OpenAI account. These controls can guide recognition of accented speech and uncommon words; they do not train a personal voice model or guarantee accuracy. Use automatic detection for mixed-language meetings.
+
+Settings apply when a new recording starts. Normal retries keep that recording's settings and skip saved chunks. An explicit retry after **No speech detected** uses your current settings and retranscribes only empty results; this can incur another API charge. A source with zero captured frames cannot be recovered by transcription. **New meeting** starts a separate note without deleting the old one.
+
+Connect AirPods or other Bluetooth devices and select the intended macOS input before starting. Mid-recording device reconnection/rebinding is not implemented. Capture warnings report missing/stalled frames, not speech intelligibility.
+
 ## Build from source
 
 Install Node.js 22.12 or later, the stable Rust toolchain, and Xcode Command Line Tools, then run:
@@ -69,7 +81,8 @@ Meeting metadata, original notes, transcripts, and enhanced notes are stored loc
 ## Limitations
 
 - Transcription and enrichment require internet access and paid OpenAI API access.
-- Meeting questions intentionally use at most the 20 most recent completed meetings in the current scope.
+- Library questions use at most the 20 most recent completed meetings in the selected scope. **Ask this meeting** uses exactly the open completed meeting. Combined source text is limited to 200,000 UTF-8 bytes; oversized selections are rejected explicitly.
+- Language/vocabulary controls are not an accent benchmark. Physical Bluetooth switching and long real-world capture still need broader validation.
 - Folders and notes are local to one Mac; there are no accounts, shared workspaces, or team sync.
 - This beta is ad-hoc signed but not notarized. macOS 14 requires a one-time right-click **Open**; macOS 15 or later requires trying the first launch, then **System Settings → Privacy & Security → Open Anyway**.
 - Model output can be incomplete or wrong; review enhanced notes against the Original view.
@@ -88,12 +101,17 @@ Chunk offsets describe recorded audio, not guaranteed wall-clock timing through 
 
 ## Roadmap
 
-- Full transcript view with search and copy.
-- Ask-a-meeting and broader ask-all-meetings retrieval beyond the current bounded library questions.
+- Broader ask-all-meetings retrieval beyond the current explicit source budget.
+- Automatic microphone/device reconnection and live input-level feedback.
+- Optional live captions and importing existing audio.
 - Speaker diarization and optional Zoom/Teams participant-name association.
 - Optional screen-share or visual context.
 - Workspace organization and polish.
 - Stable Developer ID signing and notarization when a signing identity is available.
+
+## Community references
+
+The language/vocabulary and meeting-workspace workflows were informed by the MIT community projects [OpenWhispr](https://github.com/OpenWhispr/openwhispr) and [Anarlog](https://github.com/fastrepl/anarlog). This release uses an original implementation with the app's existing native dependencies; no code or enterprise components were copied.
 
 ## License
 

@@ -1,7 +1,7 @@
 <script module lang="ts">
   import type { SessionStatus } from './types';
 
-  export type MeetingView = 'original' | 'enhanced';
+  export type MeetingView = 'original' | 'enhanced' | 'transcript';
 
   export function nextMeetingView(
     current: MeetingView,
@@ -9,7 +9,7 @@
     nextStatus: SessionStatus,
     originalUsedWhileProcessing: boolean
   ): MeetingView {
-    return previousStatus === 'processing' && nextStatus === 'complete' && !originalUsedWhileProcessing
+    return current !== 'transcript' && previousStatus === 'processing' && nextStatus === 'complete' && !originalUsedWhileProcessing
       ? 'enhanced'
       : current;
   }
@@ -18,14 +18,20 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import {
+    askMeeting,
     createCloseHandler,
     destroyCurrentWindow,
+    exportMarkdown,
     onWindowCloseRequested,
     saveSession
   } from './api';
   import { createAutosave } from './autosave';
   import { parseMeetingMarkdown } from './markdown';
+  import { meetingMarkdown } from './meeting-workspace';
+  import MeetingQuestion from './MeetingQuestion.svelte';
+  import { errorMessage } from './recovery';
   import RecordingDock, { captureCoverage } from './RecordingDock.svelte';
+  import TranscriptView from './TranscriptView.svelte';
   import type { RecordingHealth, Session, UpdateSessionInput } from './types';
 
   let {
@@ -36,6 +42,7 @@
     onRecordingStarted,
     onSessionChange,
     onOpenSettings,
+    onNewNote,
     onDeleteTranscript,
     onDeleteMeeting
   }: {
@@ -46,6 +53,7 @@
     onRecordingStarted: (id: string, baseline: number) => void;
     onSessionChange: (session: Session) => void;
     onOpenSettings: () => void;
+    onNewNote: () => void;
     onDeleteTranscript: (id: string) => Promise<void>;
     onDeleteMeeting: (id: string) => Promise<void>;
   } = $props();
@@ -65,6 +73,9 @@
   let confirmation = $state<'transcript' | 'meeting' | null>(null);
   let deleting = $state(false);
   let deleteError = $state('');
+  let menuExporting = $state(false);
+  let menuExportStatus = $state('');
+  let menuExportError = $state(false);
   let actionMenu: HTMLDivElement;
   let confirmationDialog: HTMLDialogElement;
 
@@ -84,6 +95,7 @@
       originalUsedWhileProcessing = document.activeElement?.id === 'original-notes';
     }
     view = nextMeetingView(view, lastStatus, session.status, originalUsedWhileProcessing);
+    if (view === 'transcript' && session.transcript === null) view = 'original';
     if (session.status !== 'processing') originalUsedWhileProcessing = false;
     lastStatus = session.status;
   });
@@ -93,13 +105,6 @@
   );
 
   onDestroy(() => void autosave.flush().catch(() => {}));
-
-  function errorMessage(error: unknown, fallback: string) {
-    if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
-      return error.message;
-    }
-    return error instanceof Error ? error.message : fallback;
-  }
 
   function input() {
     return {
@@ -151,6 +156,42 @@
     await autosave.flush();
   }
 
+  function currentSession(): Session {
+    return {
+      ...session,
+      title,
+      context,
+      attendees: input().attendees,
+      folder,
+      originalNotes
+    };
+  }
+
+  async function exportCurrentMeeting() {
+    await flush();
+    return exportMarkdown(title || 'Untitled meeting', meetingMarkdown(currentSession()));
+  }
+
+  async function askCurrentMeeting(question: string) {
+    await flush();
+    return askMeeting(session.id, question);
+  }
+
+  async function exportFromMenu() {
+    actionMenu.hidePopover();
+    menuExporting = true;
+    menuExportStatus = '';
+    menuExportError = false;
+    try {
+      menuExportStatus = `Saved to ${await exportCurrentMeeting()}`;
+    } catch (error) {
+      menuExportError = true;
+      menuExportStatus = errorMessage(error, 'The Markdown copy could not be saved. Try again.');
+    } finally {
+      menuExporting = false;
+    }
+  }
+
   function requestDeletion(target: 'transcript' | 'meeting') {
     actionMenu.hidePopover();
     confirmation = target;
@@ -193,17 +234,25 @@
       >•••</button>
     </div>
     <div bind:this={actionMenu} class="meeting-actions" id="meeting-actions" popover="auto">
+      <button type="button" disabled={menuExporting} onclick={exportFromMenu}>
+        {menuExporting ? 'Saving…' : 'Export Markdown'}
+      </button>
       <button
+        class="danger-action"
         type="button"
         disabled={session.transcript === null || session.status === 'recording' || session.status === 'processing'}
         onclick={() => requestDeletion('transcript')}
       >Delete transcript</button>
       <button
+        class="danger-action"
         type="button"
         disabled={session.status === 'recording' || session.status === 'processing'}
         onclick={() => requestDeletion('meeting')}
       >Delete meeting</button>
     </div>
+    {#if menuExportStatus}
+      <p class:error={menuExportError} class="menu-export-status" aria-live="polite">{menuExportStatus}</p>
+    {/if}
     <label class="sr-only" id="meeting-title-label" for="meeting-title">Title</label>
     <textarea
       class="meeting-title-input"
@@ -243,6 +292,18 @@
     </div>
   </header>
 
+  <RecordingDock
+    {session}
+    {hasApiKey}
+    {health}
+    {recordingStartedAt}
+    {onRecordingStarted}
+    onFlush={flush}
+    {onSessionChange}
+    {onOpenSettings}
+    {onNewNote}
+  />
+
   {#if session.captureHealth || session.warnings?.length}
     <aside class="capture-health" aria-label="Saved recording coverage">
       {#if session.captureHealth}<p>{captureCoverage(session.captureHealth)}</p>{/if}
@@ -253,7 +314,7 @@
   <section class="notes-section" aria-labelledby="notes-title">
     <div class="notes-heading-row">
       <h2 id="notes-title">Notes</h2>
-      {#if session.status === 'complete'}
+      {#if session.status === 'complete' || session.transcript !== null}
         <div class="result-switch" aria-label="Note version">
           <button
             type="button"
@@ -261,18 +322,34 @@
             aria-pressed={view === 'original'}
             onclick={() => (view = 'original')}
           >Original</button>
-          <button
-            type="button"
-            class:active={view === 'enhanced'}
-            aria-pressed={view === 'enhanced'}
-            onclick={() => (view = 'enhanced')}
-          >Enhanced</button>
+          {#if session.status === 'complete'}
+            <button
+              type="button"
+              class:active={view === 'enhanced'}
+              aria-pressed={view === 'enhanced'}
+              onclick={() => (view = 'enhanced')}
+            >Enhanced</button>
+          {/if}
+          {#if session.transcript !== null}
+            <button
+              type="button"
+              class:active={view === 'transcript'}
+              aria-pressed={view === 'transcript'}
+              onclick={() => (view = 'transcript')}
+            >Transcript</button>
+          {/if}
         </div>
       {/if}
     </div>
 
-    {#if view === 'enhanced' && session.enrichedNotes}
-      <div class="enhanced-notes">
+    {#if view === 'transcript' && session.transcript !== null}
+      <TranscriptView
+        transcript={session.transcript}
+        partial={session.status !== 'complete'}
+        onExport={exportCurrentMeeting}
+      />
+    {:else if view === 'enhanced' && session.enrichedNotes}
+      <div class="enhanced-notes" dir="auto">
         {#each parseMeetingMarkdown(session.enrichedNotes) as block}
           {#if block.kind === 'heading'}
             <h3>{block.text}</h3>
@@ -293,24 +370,25 @@
         onfocus={markOriginalUse}
         placeholder="Start with the questions, numbers, and decisions you want to remember."
         spellcheck="true"
+        dir="auto"
       ></textarea>
     {/if}
 
-    <p class:error={saveStatus && !['Unsaved', 'Saving…', 'Saved'].includes(saveStatus)} class="save-status" aria-live="polite">
-      {saveStatus}
-    </p>
+    <div class="save-row">
+      <p class:error={saveStatus && !['Unsaved', 'Saving…', 'Saved'].includes(saveStatus)} class="save-status" aria-live="polite">
+        {saveStatus}
+      </p>
+      {#if saveStatus && !['Unsaved', 'Saving…', 'Saved'].includes(saveStatus)}
+        <button class="retry-save" type="button" onclick={() => void flush().catch(() => {})}>Retry save</button>
+      {/if}
+    </div>
   </section>
 
-  <RecordingDock
-    {session}
-    {hasApiKey}
-    {health}
-    {recordingStartedAt}
-    {onRecordingStarted}
-    onFlush={flush}
-    {onSessionChange}
-    {onOpenSettings}
-  />
+  {#if session.status === 'complete' && session.transcript !== null}
+    <MeetingQuestion {hasApiKey} onAsk={askCurrentMeeting} {onOpenSettings} />
+  {/if}
+
+
 </article>
 
 <dialog
@@ -384,7 +462,7 @@
     padding: 8px 10px;
     border: 0;
     border-radius: 6px;
-    color: var(--danger);
+    color: var(--ink);
     background: transparent;
     text-align: left;
     cursor: pointer;
@@ -392,6 +470,16 @@
 
   .meeting-actions button:hover { background: var(--sidebar); }
   .meeting-actions button:disabled { color: var(--muted-text); cursor: not-allowed; opacity: 0.55; }
+  .meeting-actions .danger-action { color: var(--danger); }
+
+  .menu-export-status {
+    margin: 8px 0 0;
+    color: var(--muted-text);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .menu-export-status.error { color: var(--danger); }
 
   .deletion-dialog { width: min(100%, 520px); }
   .deletion-dialog h2 { line-height: 1.2; }
@@ -426,4 +514,22 @@
   }
 
   .deletion-footer button:disabled { cursor: wait; opacity: 0.65; }
+
+  .save-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .retry-save {
+    padding: 5px 9px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--ink);
+    background: var(--paper);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
 </style>

@@ -545,7 +545,8 @@ fn live_synthetic_long_recording_with_openai() {
     fs::write(&script, speech).unwrap();
     let aiff = fixture.root.join("synthetic.aiff");
     let generated = std::process::Command::new("/usr/bin/say")
-        .args(["-r", "210", "-f"])
+        // A user's default voice can be unavailable and still make say return success with near-empty audio.
+        .args(["-v", "Samantha", "-r", "190", "-f"])
         .arg(&script)
         .arg("-o")
         .arg(&aiff)
@@ -571,12 +572,17 @@ fn live_synthetic_long_recording_with_openai() {
     let duration = info.frames as f64 / info.sample_rate;
     assert!(
         duration > 300.0,
-        "Synthetic audio must span multiple chunks"
+        "Synthetic audio must span multiple chunks; generated {duration:.2} seconds"
     );
     let mut state = fixture.state("https://api.openai.com/v1");
     state.openai = OpenAiClient::new();
     let mut session = state.store.get(&fixture.id).unwrap();
     session.audio_path = Some(audio.to_string_lossy().into());
+    session.transcription_settings = crate::domain::TranscriptionSettings {
+        language: "en".into(),
+        vocabulary: "Cedar, Maya, Monday, verification".into(),
+        model: "gpt-4o-transcribe".into(),
+    };
     session.original_notes = "[SIMULATION] Prioritize the final decision, the release day and the person who owns verification.".into();
     state.store.save(&session).unwrap();
     // Credential bytes stay in process memory; never print or persist command output.
@@ -633,4 +639,111 @@ fn live_synthetic_long_recording_with_openai() {
         complete
     );
     println!("Live synthetic acceptance passed: {:.1} seconds, {} chunks, {} transcript words; completed notes reopened, original notes preserved, audio cleaned.",duration,complete.transcription[0].chunks.len(),transcript.split_whitespace().count());
+}
+
+#[test]
+fn product_no_speech_retry_reopens_only_empty_checkpoints() {
+    let fixture = Fixture::new();
+    let state = fixture.state("http://127.0.0.1:9/v1");
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Failed;
+    session.error = Some(AppError::new("no_speech", "empty"));
+    session.transcription = vec![SourceTranscript {
+        source: AudioSource::System,
+        chunks: vec![
+            TranscriptChunk {
+                start_seconds: 0.0,
+                duration_seconds: 1.0,
+                transcript: Some("kept".into()),
+            },
+            TranscriptChunk {
+                start_seconds: 1.0,
+                duration_seconds: 1.0,
+                transcript: Some(" \n".into()),
+            },
+        ],
+    }];
+    state.store.save(&session).unwrap();
+    let retried = prepare_retry(&state, &fixture.id).unwrap();
+    assert_eq!(retried.transcription[0].chunks[1].transcript, None);
+    assert_eq!(
+        retried.transcription[0].chunks[0].transcript.as_deref(),
+        Some("kept")
+    );
+    assert_eq!(retried.original_notes, session.original_notes);
+}
+
+#[test]
+fn product_exact_scope_and_export_are_bounded() {
+    let fixture = Fixture::new();
+    let state = fixture.state("http://127.0.0.1:9/v1");
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Complete;
+    state.store.save(&session).unwrap();
+    assert_eq!(
+        question_sources(&state.store, Some("other folder"), Some(&fixture.id)).unwrap(),
+        vec![session.clone()]
+    );
+    assert!(question_sources(&state.store, None, Some("missing")).is_err());
+    session.status = SessionStatus::Processing;
+    state.store.save(&session).unwrap();
+    assert!(question_sources(&state.store, None, Some(&fixture.id)).is_err());
+    assert!(validate_question(&"界".repeat(2001)).is_err());
+    let first = export_markdown_to(&fixture.root, "../../evil/界", "# First\n界").unwrap();
+    let second = export_markdown_to(&fixture.root, "../../evil/界", "# Second").unwrap();
+    assert_eq!(first.parent(), Some(fixture.root.as_path()));
+    assert_ne!(first, second);
+    assert_eq!(fs::read_to_string(first).unwrap(), "# First\n界");
+    assert!(export_markdown_to(&fixture.root, "title", " \n").is_err());
+}
+
+#[test]
+fn product_no_speech_retry_adopts_settings_and_clears_resolved_warning() {
+    let fixture = Fixture::new();
+    fixture.source(false, 1, false);
+    let (url, requests) = server(
+        vec![text_response("RECOVERED_SPEECH"), enrichment()],
+        |_| {},
+    );
+    let state = fixture.state(&url);
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Failed;
+    session.error = Some(AppError::new("no_speech", "empty"));
+    session.warnings = vec![
+        "System audio had no transcribed speech. Notes use only the available sources.".into(),
+        "Capture interrupted.".into(),
+    ];
+    session.transcription = vec![SourceTranscript {
+        source: AudioSource::System,
+        chunks: vec![TranscriptChunk {
+            start_seconds: 0.0,
+            duration_seconds: 1.0,
+            transcript: Some(String::new()),
+        }],
+    }];
+    state.store.save(&session).unwrap();
+    let settings = crate::domain::TranscriptionSettings {
+        language: "en".into(),
+        vocabulary: "RECOVERED_SPEECH".into(),
+        model: "gpt-4o-transcribe".into(),
+    };
+    state.store.save_settings(&settings).unwrap();
+    assert_eq!(
+        prepare_retry(&state, &fixture.id)
+            .unwrap()
+            .transcription_settings,
+        settings
+    );
+    let complete = tauri::async_runtime::block_on(process_session_with_key(
+        &state,
+        &fixture.id,
+        "test-key",
+        |_| {},
+    ))
+    .unwrap();
+    assert_eq!(complete.warnings, vec!["Capture interrupted."]);
+    let sent = requests.join().unwrap();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].contains("gpt-4o-transcribe"));
+    assert!(complete.transcript.unwrap().contains("RECOVERED_SPEECH"));
 }

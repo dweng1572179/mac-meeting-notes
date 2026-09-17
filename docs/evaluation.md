@@ -51,3 +51,16 @@ The source tree has the following automated evidence:
 - Native recorder checks cover single-owner recording, safe callback shutdown, microphone error mapping, and preservation of both audio paths for retry.
 
 These checks do not substitute for verifying the selected physical microphone before an important meeting.
+
+## v0.3.0 product workflow acceptance
+
+Verified on September 16, 2026:
+
+- 104 ordinary Rust checks passed, with the paid live check excluded from the ordinary suite; all 40 frontend/API checks passed.
+- Svelte check reported zero errors/warnings; production frontend build, Rust formatting, Clippy with warnings denied, and diff whitespace checks passed.
+- The paid synthetic check passed separately using `gpt-4o-transcribe`, English, and bounded vocabulary hints: 414.7 seconds, two chunks, 922 transcript words, correct final decision, preserved original notes, successful reopen, and cleaned synthetic audio.
+- The speech fixture now selects macOS Samantha explicitly: this machine's default `say` voice returned success with only 0.005 seconds of audio. The fixture validates duration before making API calls.
+- Browser checks exercised persisted preferences, literal transcript highlighting, question pending-state continuity, no-speech recovery, and layouts at 1280×900 and 800×720 without horizontal overflow. Recovery appears inline above notes.
+- Review findings were fixed and rechecked: pending questions cannot be edited, exports label incomplete transcripts, and questions use complete sources or explicitly reject a selection over 200,000 UTF-8 bytes instead of silently cutting source text.
+
+This evidence covers workflow correctness and the configured recognition request. It does not establish accuracy across all accents, Bluetooth reconnection, or uninterrupted multi-hour physical capture. Existing local meeting content was not used in the tests.

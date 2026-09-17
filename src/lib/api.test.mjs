@@ -93,3 +93,33 @@ test('capture health requests the active session and preserves source warnings',
     delete globalThis.window;
   }
 });
+
+test('single-meeting questions and settings preserve their native scope and values', async () => {
+  globalThis.window = {};
+  const settings = { language: 'en', vocabulary: 'Darryl, São Paulo', model: 'gpt-4o-transcribe' };
+  const requests = [];
+  mockIPC((command, payload) => {
+    requests.push({ command, payload });
+    return command === 'save_transcription_settings' ? settings : { answer: 'Saved decision', citations: [] };
+  });
+  try {
+    await api.askMeeting('exact-id', 'What was decided?');
+    assert.deepEqual(await api.saveTranscriptionSettings(settings), settings);
+    assert.deepEqual(requests, [
+      { command: 'ask_meetings', payload: { folder: null, sessionId: 'exact-id', question: 'What was decided?' } },
+      { command: 'save_transcription_settings', payload: { settings } }
+    ]);
+  } finally { delete globalThis.window; }
+});
+
+test('native Markdown export passes content without choosing an arbitrary filesystem path', async () => {
+  globalThis.window = {};
+  mockIPC((command, payload) => {
+    assert.equal(command, 'export_markdown');
+    assert.deepEqual(payload, { title: 'Meeting', markdown: '# Original\n\nKeep my words.' });
+    return '/Users/example/Downloads/Meeting-unique.md';
+  });
+  try {
+    assert.match(await api.exportMarkdown('Meeting', '# Original\n\nKeep my words.'), /Downloads\/Meeting-unique.md$/);
+  } finally { delete globalThis.window; }
+});

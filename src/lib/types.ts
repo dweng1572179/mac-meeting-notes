@@ -17,13 +17,15 @@ export type Session = {
   microphoneAudioPath: string | null;
   warnings?: string[];
   captureHealth?: RecordingHealth | null;
+  transcriptionSettings?: TranscriptionSettings;
   transcription?: {
     source: 'system' | 'microphone';
     chunks: { startSeconds: number; durationSeconds: number; transcript: string | null }[];
   }[];
 };
 
-export type Bootstrap = { sessions: Session[]; hasApiKey: boolean };
+export type TranscriptionSettings = { language: string; vocabulary: string; model: 'gpt-4o-mini-transcribe' | 'gpt-4o-transcribe' };
+export type Bootstrap = { sessions: Session[]; hasApiKey: boolean; settings: TranscriptionSettings };
 export type CreateSessionInput = Pick<Session, 'title' | 'context' | 'attendees'>;
 export type UpdateSessionInput = Pick<
   Session,
