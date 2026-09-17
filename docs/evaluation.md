@@ -158,3 +158,16 @@ Synthetic browser checks at desktop and compact sizes covered note tabs, empty t
 Real microphones, Bluetooth reconnection, accents, and long physical meetings were not part of this synthetic acceptance.
 
 Final local verification on 2026-09-17 passed 139 Rust tests (2 paid tests remain opt-in), all-target Clippy with warnings denied, Rust formatting, and diff whitespace checks. The new paid segmented test was separately run and passed as recorded above.
+
+
+### Published artifact and installation — 2026-09-17
+
+[Release v0.4.0](https://github.com/dweng1572179/mac-meeting-notes/releases/tag/v0.4.0) was built from `744d25e824c85b19783afd041f50ad5307425ac1`. [Release run 35270801673](https://github.com/dweng1572179/mac-meeting-notes/actions/runs/35270801673) passed frontend tests/type checks, Rust tests, all-target Clippy, the production app build, packaging regression, and mounted-app signature verification.
+
+- Public DMG: 6,147,400 bytes; SHA-256 `e34411340b411975a7f36a9335d2c79d5f7417ae1ec742eaa963c253c6ff9631`, matching GitHub's asset digest.
+- The downloaded artifact passed a read-only mount, strict deep signature verification, version 0.4.0 check, and audio-input entitlement check.
+- Installation followed a fresh inactive-session check and graceful quit. Every installed bundle file matched the public artifact; executable SHA-256 is `d2879deab269f0e330252e0e08523deb3d8504e8f455eae225d949c748812360`.
+- Both existing meeting files remained byte-for-byte unchanged. Neither was reprocessed. One verified release DMG remains in Downloads.
+- Native launch reached the app window, but the remaining native UI smoke check is **pending user Keychain approval**. A targeted process sample showed the synchronous bootstrap waiting inside macOS Keychain access. UI inspection timed out. This is not recorded as a passing native smoke test; the synthetic browser acceptance above remains the verified UI evidence. No Keychain permissions or credentials were changed by the agent.
+
+The paid fixture, production build, and automated checks establish the tested software paths. They do not remove ad-hoc-signing prompts or establish physical-device, accent, or multi-speaker accuracy.
