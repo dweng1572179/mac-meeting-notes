@@ -64,3 +64,13 @@ Verified on September 16, 2026:
 - Review findings were fixed and rechecked: pending questions cannot be edited, exports label incomplete transcripts, and questions use complete sources or explicitly reject a selection over 200,000 UTF-8 bytes instead of silently cutting source text.
 
 This evidence covers workflow correctness and the configured recognition request. It does not establish accuracy across all accents, Bluetooth reconnection, or uninterrupted multi-hour physical capture. Existing local meeting content was not used in the tests.
+
+### Published artifact and installed-app verification
+
+[Release v0.3.0](https://github.com/dweng1572179/mac-meeting-notes/releases/tag/v0.3.0) was built from `fbfd321d4547c91b4024ffe504e0b4f534a445a3`. [Release workflow 35176722703](https://github.com/dweng1572179/mac-meeting-notes/actions/runs/35176722703) passed all checks, production compilation, packaging regression checks, and mounted signature/entitlement verification.
+
+- DMG: 5,944,097 bytes; SHA-256 `55fdb81f8eed42f6fd0eadf4b1e2b8f9aebb1aa5229e6dd6f7036316abe83877`.
+- The downloaded public artifact passed a second local digest check, read-only mount, strict signature verification, version check, and audio-input entitlement check.
+- Installation occurred with the app stopped and no recording/processing session. The installed executable matched the public artifact exactly.
+- Native smoke testing verified synthetic note autosave, Markdown export including Unicode text and draft status, recognition settings, and successful reopening. The disposable note/export were removed, and the existing library remained byte-for-byte unchanged.
+- Generated build caches, verification screenshots, mounts, temporary artifacts, and the rollback app were removed. One verified DMG remains in Downloads; no development servers, test jobs, or browser automation sessions remain running.
