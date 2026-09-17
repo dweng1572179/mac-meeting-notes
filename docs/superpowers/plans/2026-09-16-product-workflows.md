@@ -46,7 +46,9 @@
 ## Task 4: Review, release, install
 
 - [x] Review combined implementation for privacy, storage safety, request correctness, and UI continuity. Fix material findings.
-- [ ] Run full appropriate tests, check, fmt, clippy, production app packaging, and a synthetic live hints check.
-- [ ] Bump to 0.3.0, update README/release notes/roadmap and workflow, commit/push/PR/merge/tag without rewriting existing history.
-- [ ] Verify public release DMG, then install only if no active recording; verify unchanged user library and exact installed version.
-- [ ] Remove owned caches/temporary artifacts, stop all started processes, retain one verified downloadable DMG.
+- [x] Run full appropriate tests, check, fmt, clippy, production app packaging, and a synthetic live hints check.
+- [x] Bump to 0.3.0, update README/release notes/roadmap and workflow, commit/push/PR/merge/tag without rewriting existing history.
+- [x] Verify public release DMG, then install only if no active recording; verify unchanged user library and exact installed version.
+- [x] Remove owned caches/temporary artifacts, stop all started processes, retain one verified downloadable DMG.
+
+Completion evidence: `docs/evaluation.md`, v0.3.0 product workflow acceptance and published artifact verification.
