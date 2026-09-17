@@ -171,3 +171,14 @@ Final local verification on 2026-09-17 passed 139 Rust tests (2 paid tests remai
 - Native launch reached the app window, but the remaining native UI smoke check is **pending user Keychain approval**. A targeted process sample showed the synchronous bootstrap waiting inside macOS Keychain access. UI inspection timed out. This is not recorded as a passing native smoke test; the synthetic browser acceptance above remains the verified UI evidence. No Keychain permissions or credentials were changed by the agent.
 
 The paid fixture, production build, and automated checks establish the tested software paths. They do not remove ad-hoc-signing prompts or establish physical-device, accent, or multi-speaker accuracy.
+
+
+## v0.4.1 presentation corrections — 2026-09-17
+
+The reported composer defect came from overlapping textarea and wrapper focus rules, duplicated across two implementations. Both views now share one compact composer. Repeated “Transcript section” headings exposed internal upload boundaries; plain chunks now show source/time metadata and paragraph text without that heading.
+
+Regression tests first reproduced repeated chunk headings, long unbroken text, and unsupported Markdown headings. The final checks cover source-text retention, cross-paragraph phrase search, legacy-only boilerplate filtering, scoped speakers, and escaped inline Markdown. Independent review caught and verified the search, boilerplate, and speaker-scope edge cases before release.
+
+Synthetic browser checks at 1180, 900, and 720 pixels verified a single wrapper focus border with no textarea outline/resize handle, no horizontal overflow, growing long questions, Command+Enter, duplicate-submit protection, a retained question after a failed request, successful retry/clear, safe emphasis rendering, expandable exact sources, and phrase matches across display breaks. No real meeting text was used in these checks. The mechanical design scan found only existing global font/capture-warning styling; the patch preserves the established app theme and capture warning.
+
+Final local verification passed 62 frontend tests, zero Svelte errors/warnings, the production frontend build, and whitespace checks. No audio processing changed and no paid API test was repeated for this presentation patch. Release/installation results are recorded separately after they run.

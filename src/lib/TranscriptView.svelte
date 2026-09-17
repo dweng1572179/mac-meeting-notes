@@ -1,6 +1,6 @@
 <script lang="ts">
   import { errorMessage } from './recovery';
-  import { legacyTranscriptParagraphs, literalHighlights, transcriptTurns, validTopicAnchors } from './meeting-workspace';
+  import { legacyTranscriptParagraphs, transcriptParagraphs, literalHighlights, transcriptTurns, validTopicAnchors } from './meeting-workspace';
   import type { Session } from './types';
 
   let { session, onExport }: { session: Session; onExport: () => Promise<string> } = $props();
@@ -11,11 +11,12 @@
   let turns = $derived(transcriptTurns(session));
   let hasSpeakerLabels = $derived(turns.some((turn) => turn.speaker !== null));
   let topics = $derived(validTopicAnchors(session.aiSuggestions?.topics, new Set(turns.map((turn) => turn.id))));
-  let legacyParagraphs = $derived(legacyTranscriptParagraphs(session.transcript ?? ''));
+  let legacyParagraphs = $derived(legacyTranscriptParagraphs(session.transcript ?? '', query));
   let matchCount = $derived(
     (turns.length ? turns.flatMap((turn) => turn.id === 'legacy-transcript'
-      ? legacyTranscriptParagraphs(turn.text).map((paragraph) => legacyBlock(paragraph).text)
-      : [turn.text]) : legacyParagraphs.map((paragraph) => legacyBlock(paragraph).text))
+      ? legacyTranscriptParagraphs(turn.text, query).map((paragraph) => legacyBlock(paragraph).text)
+      : transcriptParagraphs(turn.text, query))
+      : legacyParagraphs.map((paragraph) => legacyBlock(paragraph).text))
       .flatMap((text) => literalHighlights(text, query.trim()))
       .filter((segment) => segment.match).length
   );
@@ -90,18 +91,22 @@
         {@const topic = topics.find((item) => item.startsAtTurnId === turn.id)}
         {#if topic}<h3 class="topic-heading">{topic.title}</h3>{/if}
         <article class="turn" id={turn.id}>
-          <div class="turn-heading">
-            <strong>{turn.speaker ? `Speaker ${turn.speaker}` : turn.id === 'legacy-transcript' ? 'Transcript' : 'Transcript section'}</strong>
-            <span>{sourceLabel(turn.source)}{turn.id === 'legacy-transcript' ? '' : ` · ${turn.sectionLabel} · ${time(turn.startSeconds)}–${time(turn.endSeconds)}`}</span>
-          </div>
+          {#if turn.source}
+            <div class="turn-heading">
+              {#if turn.speaker}<strong>Speaker {turn.speaker}</strong>{/if}
+              <span title={`${sourceLabel(turn.source)} · ${time(turn.startSeconds)}–${time(turn.endSeconds)}`}><time>{time(turn.startSeconds)}</time> · {sourceLabel(turn.source)}{turn.speaker ? ` · ${turn.sectionLabel}` : ''}</span>
+            </div>
+          {/if}
           {#if turn.id === 'legacy-transcript'}
-            {#each legacyTranscriptParagraphs(turn.text) as paragraph}
+            {#each legacyTranscriptParagraphs(turn.text, query) as paragraph}
               {@const block = legacyBlock(paragraph)}
               {#if block.meta}<p class="turn-meta"><strong>{block.meta}</strong></p>{/if}
               <p class="legacy-paragraph">{#each literalHighlights(block.text, query.trim()) as segment}{#if segment.match}<mark>{segment.text}</mark>{:else}{segment.text}{/if}{/each}</p>
             {/each}
           {:else}
-            <p>{#each literalHighlights(turn.text, query.trim()) as segment}{#if segment.match}<mark>{segment.text}</mark>{:else}{segment.text}{/if}{/each}</p>
+            {#each transcriptParagraphs(turn.text, query) as paragraph}
+              <p class="legacy-paragraph">{#each literalHighlights(paragraph, query.trim()) as segment}{#if segment.match}<mark>{segment.text}</mark>{:else}{segment.text}{/if}{/each}</p>
+            {/each}
           {/if}
         </article>
       {/each}
@@ -116,7 +121,7 @@
   </div>
 
   <details class="raw-transcript">
-    <summary>Raw transcript</summary>
+    <summary>View original text</summary>
     <pre dir="auto">{session.transcript}</pre>
   </details>
   <p class:error={statusError} class="action-status" aria-live="polite">{actionStatus}</p>
@@ -127,7 +132,7 @@
   .transcript-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; }
   .transcript-header p, .action-status { margin: 0; color: var(--muted-text); font-size: 12px; line-height: 1.45; }
   .transcript-actions { display: flex; gap: 7px; }
-  button { min-height: 34px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--paper); font-weight: 650; cursor: pointer; }
+  button { min-height: 34px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--paper); font-size: 12px; font-weight: 500; cursor: pointer; }
   button:hover { background: var(--sidebar); }
   button:disabled { cursor: wait; opacity: .55; }
   .topic-nav { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -140,12 +145,12 @@
   .turn + .turn { margin-top: 22px; }
   .topic-heading { margin: 28px 0 12px; color: var(--ink); font-family: Georgia, ui-serif, serif; font-size: 18px; font-weight: 500; }
   .topic-heading:first-child { margin-top: 0; }
-  .turn-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin: 0 0 6px; }
-  .turn-heading strong { color: var(--ink); font-family: Georgia, ui-serif, serif; font-size: 15px; font-weight: 600; }
-  .turn-heading span { color: var(--muted-text); font-size: 10px; text-align: right; }
-  .turn-meta { display: flex; justify-content: space-between; gap: 14px; margin: 0 0 6px; color: var(--muted-text); font-size: 11px; line-height: 1.4; }
+  .turn-heading { display: flex; align-items: baseline; gap: 10px; margin: 0 0 7px; }
+  .turn-heading strong { color: var(--ink); font-size: 12px; font-weight: 600; }
+  .turn-heading span { color: var(--muted-text); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .turn-meta { display: flex; gap: 10px; margin: 0 0 7px; color: var(--muted-text); font-size: 11px; line-height: 1.4; }
   .turn-meta strong { color: var(--accent-text); font-weight: 700; }
-  .turn > p:last-child, .legacy-paragraph { max-width: 70ch; margin: 0; color: #3e3e36; font-family: Georgia, ui-serif, serif; font-size: 15px; line-height: 1.72; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .legacy-paragraph { max-width: 70ch; margin: 0; color: #3e3e36; font-size: 15px; line-height: 1.8; overflow-wrap: anywhere; white-space: pre-wrap; }
   .legacy-paragraph + .legacy-paragraph { margin-top: 16px; }
   .legacy-note { margin-bottom: 16px; color: var(--muted-text); font-size: 11px; }
   mark { border-radius: 3px; color: inherit; background: #e5dda7; }
