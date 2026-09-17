@@ -5,6 +5,7 @@ import {
   meetingMarkdown,
   meetingViewLabel,
   legacyTranscriptParagraphs,
+  transcriptParagraphs,
   transcriptTurns,
   validTopicAnchors
 } from './meeting-workspace';
@@ -178,5 +179,22 @@ describe('workspace labels and transcript structure', () => {
       'First thought.',
       'Second thought.\nStill second.'
     ]);
+  });
+
+  it('breaks long speech at sentence boundaries without changing or dropping words', () => {
+    const text = 'We need to review the budget before making this decision. '.repeat(24).trim();
+    const paragraphs = legacyTranscriptParagraphs(text);
+    expect(paragraphs.length).toBeGreaterThan(1);
+    expect(paragraphs.join(' ')).toBe(text);
+    expect(paragraphs.every((paragraph) => paragraph.endsWith('.'))).toBe(true);
+  });
+
+  it('keeps structured speech that resembles legacy boilerplate and searches across display breaks', () => {
+    expect(transcriptParagraphs('Source tracks overlap in time. We should update the recording pipeline.')).toEqual([
+      'Source tracks overlap in time. We should update the recording pipeline.'
+    ]);
+    const text = 'Review the budget before making this decision. '.repeat(24).trim();
+    expect(transcriptParagraphs(text, 'decision. Review')).toEqual([text]);
+    expect(legacyTranscriptParagraphs('Source tracks overlap in time.\n\nSaved words.')).toEqual(['Saved words.']);
   });
 });

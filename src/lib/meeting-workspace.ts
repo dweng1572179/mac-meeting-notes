@@ -73,10 +73,26 @@ export function validTopicAnchors<T extends { startsAtTurnId: string }>(topics: 
   return topics.filter((topic) => turnIds.has(topic.startsAtTurnId));
 }
 
-export function legacyTranscriptParagraphs(transcript: string) {
-  return transcript.split(/\n\s*\n/u).map((paragraph) => paragraph.trim()).filter((paragraph) =>
-    Boolean(paragraph) && !paragraph.startsWith('Source tracks overlap in time.')
-  );
+export function legacyTranscriptParagraphs(transcript: string, query = '') {
+  const text = transcript.split(/\n\s*\n/u).filter((paragraph) =>
+    !paragraph.trim().startsWith('Source tracks overlap in time.')
+  ).join('\n\n');
+  return transcriptParagraphs(text, query);
+}
+
+export function transcriptParagraphs(transcript: string, query = '') {
+  return transcript.split(/\n\s*\n/u).map((paragraph) => paragraph.trim()).filter(Boolean).flatMap((paragraph) => {
+    // Keep phrases contiguous during search, including across display-only breaks.
+    if (query.trim() || paragraph.length <= 600) return [paragraph];
+    const result: string[] = [];
+    let current = '';
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'sentence' }).segment(paragraph)) {
+      current += segment;
+      if (current.length >= 420) { result.push(current.trim()); current = ''; }
+    }
+    if (current.trim()) result.push(current.trim());
+    return result;
+  });
 }
 
 export function literalHighlights(text: string, query: string): HighlightSegment[] {

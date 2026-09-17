@@ -2,6 +2,8 @@
   import { askMeetings } from './api';
   import { sessionsForFolder, meetingStatusLabel } from './library';
   import { parseMeetingMarkdown } from './markdown';
+  import InlineMarkdown from './InlineMarkdown.svelte';
+  import QuestionComposer from './QuestionComposer.svelte';
   import { errorMessage } from './recovery';
   import type { MeetingAnswer, Session } from './types';
 
@@ -59,13 +61,6 @@
       asking = false;
     }
   }
-
-  function handleQuestionKeydown(event: KeyboardEvent) {
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      void ask();
-    }
-  }
 </script>
 
 <section class="library-workspace" aria-labelledby="library-title">
@@ -115,7 +110,7 @@
   <aside class="ask-panel" aria-labelledby="ask-title">
     <div>
       <h2 id="ask-title">Ask {folder ? `about ${folder}` : 'your meetings'}</h2>
-      <span>Answers will cite the exact meetings they came from.</span>
+      <span>{folder ? 'From the latest 20 meetings in this folder' : 'From your latest 20 completed meetings'}</span>
     </div>
     <div class="ask-response" aria-live="polite">
       {#if exchanges.length}
@@ -125,9 +120,9 @@
               <p class="asked-question" dir="auto">{exchange.question}</p>
               <div class="answer-copy" dir="auto">
                 {#each parseMeetingMarkdown(exchange.answer.answer) as block}
-                  {#if block.kind === 'heading'}<h3>{block.text}</h3>
-                  {:else if block.kind === 'bullet'}<p class="answer-bullet"><span aria-hidden="true">•</span>{block.text}</p>
-                  {:else}<p>{block.text}</p>{/if}
+                  {#if block.kind === 'heading'}<h3><InlineMarkdown text={block.text} /></h3>
+                  {:else if block.kind === 'bullet'}<p class="answer-bullet"><span aria-hidden="true">•</span><InlineMarkdown text={block.text} /></p>
+                  {:else}<p><InlineMarkdown text={block.text} /></p>{/if}
                 {/each}
               </div>
               {#if exchange.answer.citations.length}
@@ -145,24 +140,7 @@
         </ol>
       {/if}
     </div>
-    <form class="ask-form compact" onsubmit={ask}>
-      <label class="sr-only" for="meeting-question">Question</label>
-      <textarea
-        id="meeting-question"
-        bind:value={question}
-        maxlength="2000"
-        disabled={asking}
-        dir="auto"
-        oninput={() => (askError = '')}
-        onkeydown={handleQuestionKeydown}
-        rows="2"
-        placeholder="Ask across these meetings…"
-      ></textarea>
-      <button type="submit" disabled={asking || !question.trim()}>
-        {asking ? 'Reading…' : hasApiKey ? 'Ask' : 'Add key'}
-      </button>
-    </form>
-    <p class="ask-hint">⌘ Enter to ask · uses up to the latest 20 completed meetings{folder ? ' in this folder' : ''}</p>
+    <QuestionComposer id="meeting-question" bind:question {asking} {hasApiKey} onAsk={ask} onInput={() => (askError = '')} />
     {#if askError}<p class="ask-error" role="alert">{askError}</p>{/if}
   </aside>
 </section>

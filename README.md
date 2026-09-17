@@ -9,13 +9,13 @@ A lightweight macOS meeting notepad that records your microphone and computer au
 - Saves each completed transcription before deleting its audio. Ordinary retries reuse saved progress; dense sections that reach the model output limit are split further. A network failure pauses transcription without stopping capture.
 - Shows missing/stalled-source warnings and separate elapsed/captured durations. Partial transcripts and capture warnings survive interruptions.
 - Separates **Your notes**, **AI notes**, and **Transcript**. Typed notes stay yours; editable AI notes retain their generated baseline, and an empty typed-notes view says when no notes were entered.
-- Displays timed speaker turns when speaker detection is selected, with searchable text, source labels, topic navigation, and access to the raw transcript. Speaker labels are local to each source/upload; matching labels in different sections do not identify the same person.
+- Displays timed speaker turns when speaker detection is selected, with searchable text, source labels, topic navigation, and access to the raw transcript. Plain transcripts use paragraphs and quiet timestamps instead of repeating section headings. Speaker labels are local to each source/upload; matching labels in different sections do not identify the same person.
 - Produces notes plus suggested title, context, category, participants, and topic anchors in one structured enrichment response. Suggestions carry exact supporting excerpts and require your acceptance; they never silently replace manual fields. Suggestions without verified evidence are omitted while usable notes are kept.
 - Refreshes AI notes and suggestions for completed meetings from saved transcript text. This does not recreate missing audio or add genuine speaker attribution to older plain transcripts. Your AI-note edits remain separate from refreshed generated notes.
 - Exports Markdown to Downloads with notes, transcript, meeting details, and capture warnings. Incomplete processing is labeled.
 - Saves language and recognition preferences. New installations with no saved preferences default to speaker detection; existing saved choices remain unchanged. Text-only options retain vocabulary hints.
 - Organizes meetings with local categories/folders, a timeline-style library, and search across meeting details, notes, and transcripts.
-- Answers meeting and library questions with exact-source citations. Oversized source selections produce a clear error instead of silently dropping later decisions. The meeting question composer supports Command/Ctrl+Enter and keeps answers with expandable sources while the view is open.
+- Answers meeting and library questions with exact-source citations. Oversized source selections produce a clear error instead of silently dropping later decisions. Both question views use a compact, expanding composer with Command/Ctrl+Enter and expandable sources. Failed requests keep the question for retry.
 
 ## Privacy
 

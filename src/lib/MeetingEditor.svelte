@@ -62,6 +62,7 @@
   } from './api';
   import { createAutosave } from './autosave';
   import { parseMeetingMarkdown } from './markdown';
+  import InlineMarkdown from './InlineMarkdown.svelte';
   import { aiNotes, meetingMarkdown, meetingViewLabel } from './meeting-workspace';
   import MeetingQuestion from './MeetingQuestion.svelte';
   import { errorMessage } from './recovery';
@@ -490,11 +491,11 @@
       <div class="enhanced-notes" dir="auto">
         {#each parseMeetingMarkdown(aiNotes(session) ?? '') as block}
           {#if block.kind === 'heading'}
-            <h3>{block.text}</h3>
+            <h3><InlineMarkdown text={block.text} /></h3>
           {:else if block.kind === 'bullet'}
-            <p class="enhanced-bullet"><span aria-hidden="true">•</span>{block.text}</p>
+            <p class="enhanced-bullet"><span aria-hidden="true">•</span><InlineMarkdown text={block.text} /></p>
           {:else}
-            <p>{block.text}</p>
+            <p><InlineMarkdown text={block.text} /></p>
           {/if}
         {/each}
       </div>
