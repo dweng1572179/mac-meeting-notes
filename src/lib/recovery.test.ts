@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { errorMessage, processingLabel, recoveryActions } from './recovery';
+import { errorMessage, processingLabel, recordingTranscriptionLabel, recoveryActions } from './recovery';
 import type { Session } from './types';
 
 const failed = (overrides: Partial<Session> = {}) => ({
@@ -7,6 +7,17 @@ const failed = (overrides: Partial<Session> = {}) => ({
   audioPath: '/saved.m4a', microphoneAudioPath: null, transcript: null,
   ...overrides
 } as Session);
+
+it('distinguishes recording from pending, caught-up, and paused transcription', () => {
+  const recording = failed({ status: 'recording', segmentedCapture: true, error: null });
+  expect(recordingTranscriptionLabel(recording)).toBe('Transcript starts after the first minute');
+  recording.transcription = [{ source: 'system', chunks: [{ startSeconds: 0, durationSeconds: 60, transcript: null }] }];
+  expect(recordingTranscriptionLabel(recording)).toBe('Transcribing in the background');
+  recording.transcription[0].chunks[0].transcript = 'Saved words';
+  expect(recordingTranscriptionLabel(recording)).toBe('Transcript caught up');
+  recording.liveTranscriptionError = { code: 'network', message: 'Offline' };
+  expect(recordingTranscriptionLabel(recording)).toBe('Transcript paused · audio kept');
+});
 
 describe('error recovery', () => {
   it('keeps structured backend details and adds only relevant permission guidance', () => {
@@ -30,7 +41,7 @@ describe('error recovery', () => {
   });
 
   it('distinguishes writing notes from transcription progress', () => {
-    expect(processingLabel(failed({ transcript: 'Saved words' }))).toBe('Writing enhanced notes…');
+    expect(processingLabel(failed({ transcript: 'Saved words' }))).toBe('Writing AI notes…');
     expect(processingLabel(failed({ transcription: [{ source: 'system', chunks: [
       { startSeconds: 0, durationSeconds: 300, transcript: 'Saved' },
       { startSeconds: 300, durationSeconds: 20, transcript: null }

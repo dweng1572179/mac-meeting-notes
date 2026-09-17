@@ -21,6 +21,13 @@ impl Default for TranscriptionSettings {
 }
 
 impl TranscriptionSettings {
+    pub fn new_recording_default() -> Self {
+        Self {
+            model: "gpt-4o-transcribe-diarize".into(),
+            ..Self::default()
+        }
+    }
+
     pub fn validate(&self) -> AppResult<()> {
         if !(self.language.is_empty()
             || (self.language.len() == 2
@@ -36,7 +43,7 @@ impl TranscriptionSettings {
         }
         if !matches!(
             self.model.as_str(),
-            "gpt-4o-mini-transcribe" | "gpt-4o-transcribe"
+            "gpt-4o-mini-transcribe" | "gpt-4o-transcribe" | "gpt-4o-transcribe-diarize"
         ) {
             return Err(AppError::new(
                 "invalid_transcription_settings",
@@ -93,6 +100,18 @@ pub struct Session {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub capture_health: Option<crate::recorder::RecordingHealth>,
+    #[serde(default)]
+    pub capture_segments: Vec<CaptureSegment>,
+    #[serde(default)]
+    pub segmented_capture: bool,
+    #[serde(default)]
+    pub live_transcription_error: Option<AppError>,
+    #[serde(default)]
+    pub ai_suggestions: Option<AiSuggestions>,
+    #[serde(default)]
+    pub edited_enriched_notes: Option<String>,
+    #[serde(default)]
+    pub dismissed_suggestions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,6 +142,10 @@ pub struct TranscriptChunk {
     pub start_seconds: f64,
     pub duration_seconds: f64,
     pub transcript: Option<String>,
+    #[serde(default)]
+    pub segment_index: Option<u64>,
+    #[serde(default)]
+    pub segments: Vec<TranscriptSegment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -200,6 +223,12 @@ impl Session {
             transcription_settings: TranscriptionSettings::default(),
             warnings: Vec::new(),
             capture_health: None,
+            capture_segments: Vec::new(),
+            segmented_capture: false,
+            live_transcription_error: None,
+            ai_suggestions: None,
+            edited_enriched_notes: None,
+            dismissed_suggestions: Vec::new(),
         }
     }
 
@@ -242,4 +271,239 @@ pub fn transition_to_failed(mut session: Session, error: AppError) -> Session {
     session.status = SessionStatus::Failed;
     session.error = Some(error);
     session
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSegment {
+    pub source: AudioSource,
+    pub index: u64,
+    pub start_seconds: f64,
+    pub duration_seconds: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSegment {
+    pub id: String,
+    pub speaker: String,
+    #[serde(alias = "start")]
+    pub start_seconds: f64,
+    #[serde(alias = "end")]
+    pub end_seconds: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TranscriptionResult {
+    pub text: String,
+    pub segments: Vec<TranscriptSegment>,
+}
+
+impl TranscriptionResult {
+    pub fn validate(&self, duration_seconds: f64) -> AppResult<()> {
+        validate_transcript_segments(&self.segments, duration_seconds)
+    }
+}
+
+pub fn validate_transcript_segments(
+    segments: &[TranscriptSegment],
+    duration_seconds: f64,
+) -> AppResult<()> {
+    let invalid = || {
+        AppError::new(
+            "invalid_transcription",
+            "Speaker timestamps are invalid. Your audio and saved progress were kept.",
+        )
+    };
+    if !duration_seconds.is_finite() || duration_seconds < 0.0 {
+        return Err(invalid());
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut previous_start = 0.0;
+    for segment in segments {
+        if segment.id.trim().is_empty()
+            || segment.id.len() > 256
+            || segment.speaker.trim().is_empty()
+            || segment.speaker.len() > 256
+            || segment.text.trim().is_empty()
+            || !ids.insert(&segment.id)
+            || !segment.start_seconds.is_finite()
+            || !segment.end_seconds.is_finite()
+            || segment.start_seconds < previous_start
+            || segment.end_seconds <= segment.start_seconds
+            || segment.end_seconds > duration_seconds + 1.0
+        {
+            return Err(invalid());
+        }
+        previous_start = segment.start_seconds;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Evidence {
+    pub source_id: String,
+    pub excerpt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Suggestion {
+    pub value: String,
+    pub evidence: Vec<Evidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParticipantSuggestion {
+    pub name: String,
+    pub speaker_key: Option<String>,
+    pub evidence: Vec<Evidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicSuggestion {
+    pub title: String,
+    pub starts_at_turn_id: String,
+    pub evidence: Vec<Evidence>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSuggestions {
+    pub title: Option<Suggestion>,
+    pub context: Option<Suggestion>,
+    pub category: Option<Suggestion>,
+    pub participants: Vec<ParticipantSuggestion>,
+    pub topics: Vec<TopicSuggestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptTurn {
+    pub id: String,
+    pub speaker_key: Option<String>,
+    pub source: AudioSource,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeetingSource {
+    pub id: String,
+    pub text: String,
+}
+
+pub fn chunk_key(source: AudioSource, chunk: &TranscriptChunk) -> String {
+    let source = match source {
+        AudioSource::System => "system",
+        AudioSource::Microphone => "microphone",
+    };
+    let offset = format!("offset-{:.0}", (chunk.start_seconds * 1000.0).round());
+    match chunk.segment_index {
+        Some(index) => format!("{source}:segment-{index}:{offset}"),
+        None => format!("{source}:{offset}"),
+    }
+}
+
+pub fn transcript_turns(session: &Session) -> Vec<TranscriptTurn> {
+    let mut turns = Vec::new();
+    for track in &session.transcription {
+        for chunk in &track.chunks {
+            let Some(text) = chunk
+                .transcript
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+            else {
+                continue;
+            };
+            let key = chunk_key(track.source, chunk);
+            if chunk.segments.is_empty() {
+                turns.push(TranscriptTurn {
+                    id: format!("{key}:text"),
+                    speaker_key: None,
+                    source: track.source,
+                    start_seconds: chunk.start_seconds,
+                    end_seconds: chunk.start_seconds + chunk.duration_seconds,
+                    text: text.clone(),
+                });
+            } else {
+                turns.extend(chunk.segments.iter().map(|segment| TranscriptTurn {
+                    id: format!("{key}:{}", segment.id),
+                    speaker_key: Some(format!("{key}:{}", segment.speaker)),
+                    source: track.source,
+                    start_seconds: chunk.start_seconds + segment.start_seconds,
+                    end_seconds: chunk.start_seconds + segment.end_seconds,
+                    text: segment.text.clone(),
+                }));
+            }
+        }
+    }
+    turns.sort_by(|left, right| {
+        left.start_seconds
+            .total_cmp(&right.start_seconds)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    turns
+}
+
+pub fn meeting_sources(session: &Session) -> Vec<MeetingSource> {
+    let mut sources: Vec<_> = [
+        ("manual-title", session.title.clone()),
+        ("manual-context", session.context.clone()),
+        ("manual-notes", session.original_notes.clone()),
+        ("manual-attendees", session.attendees.join(", ")),
+    ]
+    .into_iter()
+    .filter(|(_, text)| !text.trim().is_empty())
+    .map(|(id, text)| MeetingSource {
+        id: id.into(),
+        text,
+    })
+    .collect();
+    let turns = transcript_turns(session);
+    if turns.is_empty() {
+        if let Some(text) = session
+            .transcript
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            sources.push(MeetingSource {
+                id: "legacy-transcript".into(),
+                text: text.clone(),
+            });
+        }
+    } else {
+        sources.extend(turns.into_iter().map(|turn| MeetingSource {
+            id: turn.id,
+            text: turn.text,
+        }));
+        // Preserve any raw words not represented by the provider's timed segments.
+        for track in &session.transcription {
+            for chunk in &track.chunks {
+                if let Some(text) = chunk
+                    .transcript
+                    .as_ref()
+                    .filter(|_| !chunk.segments.is_empty())
+                {
+                    let segment_words: Vec<_> = chunk
+                        .segments
+                        .iter()
+                        .flat_map(|segment| segment.text.split_whitespace())
+                        .collect();
+                    if text.split_whitespace().collect::<Vec<_>>() != segment_words {
+                        sources.push(MeetingSource {
+                            id: format!("raw:{}", chunk_key(track.source, chunk)),
+                            text: text.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    sources
 }

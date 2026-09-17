@@ -1,6 +1,7 @@
 <script lang="ts">
   import { askMeetings } from './api';
   import { sessionsForFolder, meetingStatusLabel } from './library';
+  import { parseMeetingMarkdown } from './markdown';
   import { errorMessage } from './recovery';
   import type { MeetingAnswer, Session } from './types';
 
@@ -22,7 +23,7 @@
 
   let visibleSessions = $derived(sessionsForFolder(sessions, folder));
   let question = $state('');
-  let answer = $state<MeetingAnswer | null>(null);
+  let exchanges = $state<{ question: string; answer: MeetingAnswer }[]>([]);
   let asking = $state(false);
   let askError = $state('');
 
@@ -37,23 +38,32 @@
     return meetingStatusLabel(session);
   }
 
-  async function ask(event: SubmitEvent) {
-    event.preventDefault();
+  async function ask(event?: SubmitEvent) {
+    event?.preventDefault();
     if (asking) return;
-    if (!question.trim()) return;
+    const submitted = question.trim();
+    if (!submitted) return;
     if (!hasApiKey) {
       onOpenSettings();
       return;
     }
     asking = true;
     askError = '';
-    answer = null;
     try {
-      answer = await askMeetings(folder, question.trim());
+      const answer = await askMeetings(folder, submitted);
+      exchanges = [...exchanges, { question: submitted, answer }];
+      question = '';
     } catch (error) {
       askError = errorMessage(error, 'The meeting answer could not be created. Your question is still here; try again.');
     } finally {
       asking = false;
+    }
+  }
+
+  function handleQuestionKeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      void ask();
     }
   }
 </script>
@@ -104,47 +114,55 @@
 
   <aside class="ask-panel" aria-labelledby="ask-title">
     <div>
-      <p>Meeting intelligence</p>
       <h2 id="ask-title">Ask {folder ? `about ${folder}` : 'your meetings'}</h2>
       <span>Answers will cite the exact meetings they came from.</span>
     </div>
-    <form class="ask-form" onsubmit={ask}>
-      <label for="meeting-question">Question</label>
+    <div class="ask-response" aria-live="polite">
+      {#if exchanges.length}
+        <ol class="library-exchanges" aria-label="Questions and answers">
+          {#each exchanges as exchange}
+            <li>
+              <p class="asked-question" dir="auto">{exchange.question}</p>
+              <div class="answer-copy" dir="auto">
+                {#each parseMeetingMarkdown(exchange.answer.answer) as block}
+                  {#if block.kind === 'heading'}<h3>{block.text}</h3>
+                  {:else if block.kind === 'bullet'}<p class="answer-bullet"><span aria-hidden="true">•</span>{block.text}</p>
+                  {:else}<p>{block.text}</p>{/if}
+                {/each}
+              </div>
+              {#if exchange.answer.citations.length}
+                <details class="library-sources">
+                  <summary>Sources ({exchange.answer.citations.length})</summary>
+                  <ol class="citation-list" aria-label="Meeting sources">
+                    {#each exchange.answer.citations as citation}
+                      <li><button type="button" onclick={() => onSelect(citation.sessionId)}><strong>{citation.title}</strong><span>“{citation.excerpt}”</span></button></li>
+                    {/each}
+                  </ol>
+                </details>
+              {/if}
+            </li>
+          {/each}
+        </ol>
+      {/if}
+    </div>
+    <form class="ask-form compact" onsubmit={ask}>
+      <label class="sr-only" for="meeting-question">Question</label>
       <textarea
         id="meeting-question"
         bind:value={question}
         maxlength="2000"
         disabled={asking}
         dir="auto"
-        oninput={() => { answer = null; askError = ''; }}
-        rows="3"
-        placeholder="What decisions are still waiting on follow-up?"
+        oninput={() => (askError = '')}
+        onkeydown={handleQuestionKeydown}
+        rows="2"
+        placeholder="Ask across these meetings…"
       ></textarea>
       <button type="submit" disabled={asking || !question.trim()}>
-        {asking ? 'Reading meetings…' : hasApiKey ? 'Ask meetings' : 'Add OpenAI key'}
+        {asking ? 'Reading…' : hasApiKey ? 'Ask' : 'Add key'}
       </button>
     </form>
-
-    <div class="ask-response" aria-live="polite">
-      {#if askError}
-        <p class="ask-error" role="alert">{askError}</p>
-      {:else if answer}
-        <p class="answer-copy" dir="auto">{answer.answer}</p>
-        {#if answer.citations.length}
-          <ol class="citation-list" aria-label="Meeting sources">
-            {#each answer.citations as citation}
-              <li>
-                <button type="button" onclick={() => onSelect(citation.sessionId)}>
-                  <strong>{citation.title}</strong>
-                  <span>“{citation.excerpt}”</span>
-                </button>
-              </li>
-            {/each}
-          </ol>
-        {/if}
-      {:else}
-        <p class="ask-hint">Uses up to the latest 20 completed meetings{folder ? ' in this folder' : ''}. If the saved text is too large, choose a smaller scope; content is never silently cut off.</p>
-      {/if}
-    </div>
+    <p class="ask-hint">⌘ Enter to ask · uses up to the latest 20 completed meetings{folder ? ' in this folder' : ''}</p>
+    {#if askError}<p class="ask-error" role="alert">{askError}</p>{/if}
   </aside>
 </section>

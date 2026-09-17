@@ -121,6 +121,8 @@ fn normal_exit_marks_recording_failed_with_returned_audio() {
     let interrupted = interrupted_recording(
         recording_session(),
         RecordingFiles {
+            segments: Vec::new(),
+            segmented: false,
             health: None,
             system: "/tmp/flushed.m4a".into(),
             microphone: "/tmp/flushed-mic.m4a".into(),
@@ -204,6 +206,8 @@ fn exit_cleanup_is_idempotent_after_flushing_the_active_recorder() {
     stop_recording_in_store_on_exit(&store, |_| {
         stops += 1;
         Ok(RecordingFiles {
+            segments: Vec::new(),
+            segmented: false,
             health: None,
             system: audio_path.clone(),
             microphone: microphone_audio_path.clone(),
@@ -232,4 +236,64 @@ fn recovered_recording_keeps_an_honest_coverage_warning_after_retry() {
         .iter()
         .any(|warning| warning.contains("Recording was interrupted")
             && warning.contains("incomplete")));
+}
+
+#[test]
+fn legacy_meetings_and_chunks_default_new_workspace_fields_without_changing_model() {
+    let mut saved = serde_json::to_value(session(SessionStatus::Complete)).unwrap();
+    for field in [
+        "transcriptionSettings",
+        "captureSegments",
+        "segmentedCapture",
+        "liveTranscriptionError",
+        "aiSuggestions",
+        "editedEnrichedNotes",
+        "dismissedSuggestions",
+    ] {
+        saved.as_object_mut().unwrap().remove(field);
+    }
+    let legacy: Session = serde_json::from_value(saved).unwrap();
+    assert_eq!(
+        legacy.transcription_settings.model,
+        "gpt-4o-mini-transcribe"
+    );
+    let json = serde_json::to_value(legacy).unwrap();
+    assert_eq!(json["captureSegments"], serde_json::json!([]));
+    assert_eq!(json["segmentedCapture"], false);
+    assert_eq!(json["dismissedSuggestions"], serde_json::json!([]));
+    let chunk: meeting_notes_lib::domain::TranscriptChunk = serde_json::from_value(
+        serde_json::json!({"startSeconds":0.0,"durationSeconds":10.0,"transcript":"Words"}),
+    )
+    .unwrap();
+    let json = serde_json::to_value(chunk).unwrap();
+    assert_eq!(json["segments"], serde_json::json!([]));
+    assert_eq!(json["segmentIndex"], serde_json::Value::Null);
+}
+
+#[test]
+fn speaker_turn_keys_separate_uploads_sources_and_adaptive_splits() {
+    use meeting_notes_lib::domain::{meeting_sources, transcript_turns, TranscriptionSettings};
+    assert_eq!(
+        TranscriptionSettings::new_recording_default().model,
+        "gpt-4o-transcribe-diarize"
+    );
+    let mut meeting = session(SessionStatus::Complete);
+    meeting.transcription = serde_json::from_value(serde_json::json!([
+        {"source":"system","chunks":[
+            {"segmentIndex":1,"startSeconds":60.0,"durationSeconds":30.0,"transcript":"First words", "segments":[{"id":"0","speaker":"A","startSeconds":0.1,"endSeconds":2.0,"text":"First words"}]},
+            {"segmentIndex":1,"startSeconds":90.0,"durationSeconds":30.0,"transcript":"Later words EXTRA", "segments":[{"id":"0","speaker":"A","startSeconds":0.1,"endSeconds":2.0,"text":"Later words"}]}
+        ]},
+        {"source":"microphone","chunks":[{"segmentIndex":1,"startSeconds":60.0,"durationSeconds":60.0,"transcript":"Microphone words", "segments":[{"id":"0","speaker":"A","startSeconds":0.1,"endSeconds":2.0,"text":"Microphone words"}]}]}
+    ])).unwrap();
+    let turns = transcript_turns(&meeting);
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[0].id, "microphone:segment-1:offset-60000:0");
+    assert_eq!(turns[1].id, "system:segment-1:offset-60000:0");
+    assert_eq!(turns[2].id, "system:segment-1:offset-90000:0");
+    assert_ne!(turns[1].speaker_key, turns[2].speaker_key);
+    assert_eq!(turns[2].start_seconds, 90.1);
+    assert!(meeting_sources(&meeting)
+        .iter()
+        .any(|source| source.id == "raw:system:segment-1:offset-90000"
+            && source.text.ends_with("EXTRA")));
 }

@@ -9,7 +9,7 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 
-use crate::domain::{AppError, AppResult};
+use crate::domain::{AppError, AppResult, AudioSource};
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,11 +18,49 @@ pub struct RecordingInfo {
     pub started_at: String,
 }
 
+fn segment_path(base: &Path, source: AudioSource, index: u64) -> AppResult<PathBuf> {
+    let id = base
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .ok_or_else(|| AppError::new("invalid_audio_path", "Invalid capture session path"))?;
+    if base
+        .extension()
+        .map_or(true, |extension| extension != "m4a")
+    {
+        return Err(AppError::new(
+            "invalid_audio_path",
+            "Invalid capture session path",
+        ));
+    }
+    Ok(base.with_file_name(format!("{id}-{}-segment-{index:08}.m4a", source.filename())))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedSegment {
+    pub source: AudioSource,
+    pub index: u64,
+    pub start_seconds: f64,
+    pub duration_seconds: f64,
+    pub path: PathBuf,
+}
+
+#[cfg(test)]
+#[path = "recorder_rotation_tests.rs"]
+mod rotation_tests;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingFiles {
     pub system: PathBuf,
     pub microphone: PathBuf,
     pub health: Option<RecordingHealth>,
+    pub segments: Vec<CapturedSegment>,
+    pub segmented: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -281,6 +319,25 @@ impl Recorder {
         system_path: &Path,
         microphone_path: &Path,
     ) -> AppResult<RecordingInfo> {
+        self.start_mode(session_id, system_path, microphone_path, false)
+    }
+
+    pub fn start_segmented(
+        &self,
+        session_id: &str,
+        system_path: &Path,
+        microphone_path: &Path,
+    ) -> AppResult<RecordingInfo> {
+        self.start_mode(session_id, system_path, microphone_path, true)
+    }
+
+    fn start_mode(
+        &self,
+        session_id: &str,
+        system_path: &Path,
+        microphone_path: &Path,
+        segmented: bool,
+    ) -> AppResult<RecordingInfo> {
         if session_id.is_empty() {
             return Err(AppError::new(
                 "invalid_session_id",
@@ -292,7 +349,7 @@ impl Recorder {
         slot.reserve(session_id)?;
 
         #[cfg(target_os = "macos")]
-        match native::NativeRecording::start(system_path, microphone_path) {
+        match native::NativeRecording::start(system_path, microphone_path, segmented) {
             Ok(recording) => slot.recording = Some(recording),
             Err(error) => {
                 slot.session_id = None;
@@ -302,7 +359,7 @@ impl Recorder {
 
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (system_path, microphone_path);
+            let _ = (system_path, microphone_path, segmented);
             slot.session_id = None;
             return Err(AppError::new(
                 "audio_capture_unsupported",
@@ -314,6 +371,29 @@ impl Recorder {
             session_id: session_id.to_owned(),
             started_at: Utc::now().to_rfc3339_opts(SecondsFormat::AutoSi, true),
         })
+    }
+
+    /// Run on a control worker. Capture continues while retired files finalize.
+    pub fn rotate(&self, session_id: &str) -> AppResult<Vec<CapturedSegment>> {
+        let mut slot = self.lock_slot()?;
+        if slot.session_id.as_deref() != Some(session_id) {
+            return Err(AppError::new(
+                "recording_session_mismatch",
+                "Recording belongs to a different session",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            slot.recording
+                .as_mut()
+                .ok_or_else(|| AppError::new("recorder_state", "Recording resources are missing"))?
+                .rotate()
+        }
+        #[cfg(not(target_os = "macos"))]
+        Err(AppError::new(
+            "audio_capture_unsupported",
+            "System audio capture requires macOS",
+        ))
     }
 
     pub fn stop(&self, session_id: &str) -> AppResult<RecordingFiles> {
@@ -409,7 +489,7 @@ pub(crate) mod native {
         ffi::{c_void, CStr},
         path::{Path, PathBuf},
         ptr::{self, NonNull},
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering},
         thread,
         time::Duration,
     };
@@ -444,8 +524,11 @@ pub(crate) mod native {
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
 
     use crate::{
-        domain::{AppError, AppResult},
-        recorder::{RecordingFiles, RecordingHealth, SourceCounters, SourceHealth},
+        domain::{AppError, AppResult, AudioSource},
+        recorder::{
+            segment_path, CapturedSegment, RecordingFiles, RecordingHealth, SourceCounters,
+            SourceHealth,
+        },
     };
 
     const NO_ERR: i32 = 0;
@@ -507,6 +590,203 @@ pub(crate) mod native {
         }
     }
 
+    struct SegmentSink {
+        file: AtomicPtr<objc2_audio_toolbox::OpaqueExtAudioFile>,
+        gate: CallbackGate,
+        written_frames: AtomicU64,
+        path: PathBuf,
+    }
+
+    impl SegmentSink {
+        fn create(path: &Path, format: &AudioStreamBasicDescription) -> AppResult<Box<Self>> {
+            // A numbered recording is never overwritten, even through a symlink or hard link.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|error| {
+                    AppError::new(
+                        "audio_capture",
+                        format!("Cannot create recording segment: {error}"),
+                    )
+                })?;
+            let sink = Box::new(Self {
+                file: AtomicPtr::new(ptr::null_mut()),
+                gate: CallbackGate::default(),
+                written_frames: AtomicU64::new(0),
+                path: path.to_owned(),
+            });
+            let prepared = (|| {
+                let file = create_audio_file(path, format)?;
+                sink.file.store(file, Ordering::Release);
+                set_client_format(file, format)?;
+                set_bit_rate(file)?;
+                // SAFETY: the sink exclusively owns this configured file; no callback sees it yet.
+                check_status("ExtAudioFileWriteAsync(segment prime)", unsafe {
+                    ExtAudioFileWriteAsync(file, 0, ptr::null())
+                })
+            })();
+            if let Err(error) = prepared {
+                drop(sink);
+                // This call reserved the path and no callback has seen it: no captured audio
+                // exists here. Keep the numbered name available for a later rotation retry.
+                let _ = std::fs::remove_file(path);
+                return Err(error);
+            }
+            Ok(sink)
+        }
+
+        fn close(&self) -> AppResult<()> {
+            self.gate.disable();
+            self.gate.wait_for_idle();
+            let file = self.file.swap(ptr::null_mut(), Ordering::AcqRel);
+            if file.is_null() {
+                return Ok(());
+            }
+            // SAFETY: no admitted callback can still use this handle. Dispose flushes queued async writes.
+            check_status("ExtAudioFileDispose(segment)", unsafe {
+                ExtAudioFileDispose(file)
+            })
+        }
+    }
+
+    impl Drop for SegmentSink {
+        fn drop(&mut self) {
+            // Only setup failure or recorder teardown drops a sink; success paths check close explicitly.
+            let _ = self.close();
+        }
+    }
+
+    struct SegmentWriter {
+        base: PathBuf,
+        source: AudioSource,
+        format: AudioStreamBasicDescription,
+        // ponytail: retain small closed sink boxes until stop to avoid callback pointer reclamation/ABA;
+        // only add reclamation if multi-day captures make their metadata memory measurable.
+        #[allow(clippy::vec_box)]
+        sinks: Vec<Box<SegmentSink>>,
+        start_seconds: f64,
+        finished: bool,
+    }
+
+    impl SegmentWriter {
+        fn new(
+            base: &Path,
+            source: AudioSource,
+            format: &AudioStreamBasicDescription,
+        ) -> AppResult<Self> {
+            let first = SegmentSink::create(&segment_path(base, source, 0)?, format)?;
+            Ok(Self {
+                base: base.to_owned(),
+                source,
+                format: *format,
+                sinks: vec![first],
+                start_seconds: 0.0,
+                finished: false,
+            })
+        }
+
+        fn active_ptr(&self) -> *mut SegmentSink {
+            self.sinks
+                .last()
+                .expect("writer has an active sink")
+                .as_ref() as *const SegmentSink as *mut SegmentSink
+        }
+
+        fn rotate(&mut self, callback: &CallbackState) -> AppResult<Option<CapturedSegment>> {
+            if self.finished
+                || self
+                    .sinks
+                    .last()
+                    .expect("active sink")
+                    .written_frames
+                    .load(Ordering::Acquire)
+                    == 0
+            {
+                return Ok(None);
+            }
+            let index = self.sinks.len() as u64;
+            let next =
+                SegmentSink::create(&segment_path(&self.base, self.source, index)?, &self.format)?;
+            self.sinks.push(next);
+            // Publish the fully prepared replacement before closing the old gate. A callback that
+            // already loaded the old pointer either acquires its lease or reloads the new pointer.
+            callback
+                .active_sink
+                .store(self.active_ptr(), Ordering::Release);
+            self.finalize(index - 1)
+        }
+
+        fn finish(&mut self) -> AppResult<Option<CapturedSegment>> {
+            if self.finished {
+                return Ok(None);
+            }
+            self.finished = true;
+            self.finalize(self.sinks.len() as u64 - 1)
+        }
+
+        fn finalize(&mut self, index: u64) -> AppResult<Option<CapturedSegment>> {
+            let sink = &self.sinks[index as usize];
+            // Drain before reading frame totals. Capture is already routed to the new sink, or stopped.
+            let close = sink.close();
+            let accepted_frames = sink.written_frames.load(Ordering::Acquire);
+            let start_seconds = self.start_seconds;
+            // A damaged segment still occupies its captured time. Its file stays for recovery.
+            self.start_seconds += accepted_frames as f64 / self.format.mSampleRate;
+            close?;
+            std::fs::File::open(&sink.path)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| {
+                    AppError::new(
+                        "audio_capture",
+                        format!("Cannot save finalized segment: {error}"),
+                    )
+                })?;
+            if let Some(parent) = sink.path.parent() {
+                std::fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| {
+                        AppError::new(
+                            "audio_capture",
+                            format!("Cannot save segment directory: {error}"),
+                        )
+                    })?;
+            }
+            let info = crate::audio::inspect(&sink.path)?;
+            if info.frames == 0 {
+                if accepted_frames > 0 {
+                    return Err(AppError::new(
+                        "audio_capture",
+                        "Finalized segment lost accepted audio frames",
+                    ));
+                }
+                return Ok(None);
+            }
+            let duration_seconds = info.frames as f64 / info.sample_rate;
+            if duration_seconds + 1.0 / info.sample_rate
+                < accepted_frames as f64 / self.format.mSampleRate
+            {
+                return Err(AppError::new(
+                    "audio_capture",
+                    "Finalized segment is shorter than the audio accepted during capture",
+                ));
+            }
+            self.start_seconds = start_seconds + duration_seconds;
+            Ok(Some(CapturedSegment {
+                source: self.source,
+                index,
+                start_seconds,
+                duration_seconds,
+                path: sink.path.clone(),
+            }))
+        }
+    }
+
+    #[cfg(test)]
+    mod rotation_tests {
+        include!("recorder_native_rotation_tests.rs");
+    }
+
     pub(super) struct NativeRecording {
         path: PathBuf,
         microphone_path: PathBuf,
@@ -522,6 +802,11 @@ pub(crate) mod native {
         microphone_callback: Option<Box<CallbackState>>,
         microphone_started: bool,
         started_at: ContinuousClock,
+        segmented: bool,
+        system_segments: Option<SegmentWriter>,
+        microphone_segments: Option<SegmentWriter>,
+        rotation_warnings: Vec<String>,
+        finalized_segments: Vec<CapturedSegment>,
     }
 
     // SAFETY: ownership moves only under Recorder's mutex. Core Audio accesses CallbackState
@@ -530,6 +815,7 @@ pub(crate) mod native {
 
     struct CallbackState {
         file: ExtAudioFileRef,
+        active_sink: AtomicPtr<SegmentSink>,
         bytes_per_frame: u32,
         gate: CallbackGate,
         counters: SourceCounters,
@@ -592,8 +878,23 @@ pub(crate) mod native {
     }
 
     impl NativeRecording {
-        pub(super) fn start(path: &Path, microphone_path: &Path) -> AppResult<Self> {
-            let mut recording = Self {
+        pub(super) fn start(
+            path: &Path,
+            microphone_path: &Path,
+            segmented: bool,
+        ) -> AppResult<Self> {
+            let mut recording = Self::unstarted(path, microphone_path, segmented)?;
+            // SAFETY: setup records owned resources before any later operation can fail.
+            unsafe {
+                if let Err(error) = recording.setup(path, microphone_path) {
+                    return Err(recording.fail(error));
+                }
+            }
+            Ok(recording)
+        }
+
+        fn unstarted(path: &Path, microphone_path: &Path, segmented: bool) -> AppResult<Self> {
+            Ok(Self {
                 path: path.to_owned(),
                 microphone_path: microphone_path.to_owned(),
                 tap_id: 0,
@@ -608,16 +909,12 @@ pub(crate) mod native {
                 microphone_callback: None,
                 microphone_started: false,
                 started_at: ContinuousClock::new()?,
-            };
-
-            // SAFETY: setup owns every returned resource and records it immediately so any later
-            // error can run the same complete reverse-order teardown as stop.
-            unsafe {
-                if let Err(error) = recording.setup(path, microphone_path) {
-                    return Err(recording.fail(error));
-                }
-            }
-            Ok(recording)
+                segmented,
+                system_segments: None,
+                microphone_segments: None,
+                rotation_warnings: Vec::new(),
+                finalized_segments: Vec::new(),
+            })
         }
 
         pub(super) fn stop(mut self) -> AppResult<RecordingFiles> {
@@ -634,6 +931,8 @@ pub(crate) mod native {
                 system: self.path.clone(),
                 microphone: self.microphone_path.clone(),
                 health,
+                segments: std::mem::take(&mut self.finalized_segments),
+                segmented: self.segmented,
             })
         }
 
@@ -646,7 +945,7 @@ pub(crate) mod native {
                     "Recording resources are missing",
                 ));
             };
-            Ok(RecordingHealth::from_sources(
+            let mut health = RecordingHealth::from_sources(
                 wall_seconds,
                 system
                     .counters
@@ -654,10 +953,84 @@ pub(crate) mod native {
                 microphone
                     .counters
                     .snapshot(microphone.sample_rate, wall_seconds, false),
-            ))
+            );
+            health
+                .warnings
+                .extend(self.rotation_warnings.iter().cloned());
+            Ok(health)
         }
 
-        unsafe fn setup(&mut self, path: &Path, microphone_path: &Path) -> AppResult<()> {
+        pub(super) fn rotate(&mut self) -> AppResult<Vec<CapturedSegment>> {
+            let mut finalized = Vec::new();
+            for (writer, callback) in [
+                (&mut self.system_segments, &self.callback),
+                (&mut self.microphone_segments, &self.microphone_callback),
+            ] {
+                if let (Some(writer), Some(callback)) = (writer, callback) {
+                    match writer.rotate(callback) {
+                        Ok(Some(segment)) => finalized.push(segment),
+                        Ok(None) => {}
+                        Err(error) => {
+                            let warning = format!(
+                                "{} segment finalization: {}. Captured files were kept.",
+                                writer.source.label(),
+                                error.message
+                            );
+                            if !self.rotation_warnings.contains(&warning) {
+                                self.rotation_warnings.push(warning);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(finalized)
+        }
+
+        fn prepare_stream(
+            &mut self,
+            source: AudioSource,
+            format: &AudioStreamBasicDescription,
+        ) -> AppResult<()> {
+            let (file, writer, callback, path) = match source {
+                AudioSource::System => (
+                    &mut self.file,
+                    &mut self.system_segments,
+                    &mut self.callback,
+                    &self.path,
+                ),
+                AudioSource::Microphone => (
+                    &mut self.microphone_file,
+                    &mut self.microphone_segments,
+                    &mut self.microphone_callback,
+                    &self.microphone_path,
+                ),
+            };
+            let active_sink = if self.segmented {
+                *writer = Some(SegmentWriter::new(&self.path, source, format)?);
+                writer.as_mut().expect("writer installed").active_ptr()
+            } else {
+                *file = create_audio_file(path, format)?;
+                set_client_format(*file, format)?;
+                set_bit_rate(*file)?;
+                // SAFETY: file and client format are installed before capture starts.
+                check_status("ExtAudioFileWriteAsync(prime)", unsafe {
+                    ExtAudioFileWriteAsync(*file, 0, ptr::null())
+                })?;
+                ptr::null_mut()
+            };
+            *callback = Some(Box::new(CallbackState {
+                file: *file,
+                active_sink: AtomicPtr::new(active_sink),
+                bytes_per_frame: format.mBytesPerFrame,
+                gate: CallbackGate::default(),
+                counters: SourceCounters::default(),
+                sample_rate: format.mSampleRate,
+                started_at: self.started_at,
+            }));
+            Ok(())
+        }
+
+        unsafe fn setup(&mut self, _path: &Path, microphone_path: &Path) -> AppResult<()> {
             let description = system_tap_description(process_audio_object()?);
             let tap_uid = description.UUID().UUIDString();
 
@@ -682,22 +1055,7 @@ pub(crate) mod native {
 
             self.aggregate_id = create_aggregate_device(&tap_uid)?;
             wait_for_aggregate_device(self.aggregate_id)?;
-            self.file = create_audio_file(path, &tap_format)?;
-            set_client_format(self.file, &tap_format)?;
-            set_bit_rate(self.file)?;
-            check_status(
-                "ExtAudioFileWriteAsync(prime)",
-                ExtAudioFileWriteAsync(self.file, 0, ptr::null()),
-            )?;
-
-            self.callback = Some(Box::new(CallbackState {
-                file: self.file,
-                bytes_per_frame: tap_format.mBytesPerFrame,
-                gate: CallbackGate::default(),
-                counters: SourceCounters::default(),
-                sample_rate: tap_format.mSampleRate,
-                started_at: self.started_at,
-            }));
+            self.prepare_stream(AudioSource::System, &tap_format)?;
             let callback = self.callback.as_mut().expect("callback was just set");
             check_status(
                 "AudioDeviceCreateIOProcID",
@@ -725,25 +1083,10 @@ pub(crate) mod native {
             Ok(())
         }
 
-        unsafe fn setup_microphone(&mut self, path: &Path) -> AppResult<()> {
+        unsafe fn setup_microphone(&mut self, _path: &Path) -> AppResult<()> {
             let (device, input_format) = default_input_stream()?;
             self.microphone_device_id = device;
-            self.microphone_file = create_audio_file(path, &input_format)?;
-            set_client_format(self.microphone_file, &input_format)?;
-            set_bit_rate(self.microphone_file)?;
-            check_status(
-                "ExtAudioFileWriteAsync(microphone prime)",
-                ExtAudioFileWriteAsync(self.microphone_file, 0, ptr::null()),
-            )?;
-
-            self.microphone_callback = Some(Box::new(CallbackState {
-                file: self.microphone_file,
-                bytes_per_frame: input_format.mBytesPerFrame,
-                gate: CallbackGate::default(),
-                counters: SourceCounters::default(),
-                sample_rate: input_format.mSampleRate,
-                started_at: self.started_at,
-            }));
+            self.prepare_stream(AudioSource::Microphone, &input_format)?;
             let callback = self
                 .microphone_callback
                 .as_mut()
@@ -796,6 +1139,8 @@ pub(crate) mod native {
                 &mut self.microphone_started,
                 &mut self.microphone_file,
                 &mut self.microphone_callback,
+                &mut self.microphone_segments,
+                &mut self.finalized_segments,
                 wall_seconds,
             );
             self.microphone_device_id = 0;
@@ -807,6 +1152,8 @@ pub(crate) mod native {
                 &mut self.started,
                 &mut self.file,
                 &mut self.callback,
+                &mut self.system_segments,
+                &mut self.finalized_segments,
                 wall_seconds,
             );
             if self.aggregate_id != 0 {
@@ -825,10 +1172,20 @@ pub(crate) mod native {
                 );
                 self.tap_id = 0;
             }
+            self.finalized_segments
+                .sort_by_key(|segment| match segment.source {
+                    AudioSource::System => 0,
+                    AudioSource::Microphone => 1,
+                });
             let health = system_health
                 .zip(microphone_health)
                 .map(|(system, microphone)| {
-                    RecordingHealth::from_sources(wall_seconds, system, microphone)
+                    let mut health =
+                        RecordingHealth::from_sources(wall_seconds, system, microphone);
+                    health
+                        .warnings
+                        .extend(self.rotation_warnings.iter().cloned());
+                    health
                 });
             (errors, health)
         }
@@ -844,6 +1201,8 @@ pub(crate) mod native {
         started: &mut bool,
         file: &mut ExtAudioFileRef,
         callback: &mut Option<Box<CallbackState>>,
+        segments: &mut Option<SegmentWriter>,
+        finalized: &mut Vec<CapturedSegment>,
         wall_seconds: f64,
     ) -> Option<SourceHealth> {
         if let Some(callback) = callback.as_ref() {
@@ -882,6 +1241,13 @@ pub(crate) mod native {
                 .counters
                 .snapshot(callback.sample_rate, wall_seconds, true)
         });
+        if let Some(mut writer) = segments.take() {
+            match writer.finish() {
+                Ok(Some(segment)) => finalized.push(segment),
+                Ok(None) => {}
+                Err(error) => errors.push(error),
+            }
+        }
         if !file.is_null() {
             collect_status(
                 errors,
@@ -919,29 +1285,49 @@ pub(crate) mod native {
         let Some(state) = client_data.cast::<CallbackState>().as_ref() else {
             return NO_ERR;
         };
+        write_input(state, input.as_ref());
+        NO_ERR
+    }
+
+    unsafe fn write_input(state: &CallbackState, list: &AudioBufferList) {
         let Some(_lease) = state.gate.try_enter() else {
-            return NO_ERR;
+            return;
         };
 
         state
             .counters
             .callback(state.started_at.elapsed().as_millis() as u64);
-        let list = input.as_ref();
         let Some(first_buffer) = list.mBuffers.first() else {
-            return NO_ERR;
+            return;
         };
         if list.mNumberBuffers == 0 || first_buffer.mData.is_null() {
-            return NO_ERR;
+            return;
         }
         let frames = first_buffer.mDataByteSize / state.bytes_per_frame;
         if frames == 0 {
-            return NO_ERR;
+            return;
         }
 
         state.counters.admit(frames);
-        let status = ExtAudioFileWriteAsync(state.file, frames, input.as_ptr());
+        let status = if state.active_sink.load(Ordering::Acquire).is_null() {
+            ExtAudioFileWriteAsync(state.file, frames, list)
+        } else {
+            loop {
+                // Sinks have stable addresses until the outer callback gate is drained at stop.
+                let sink = &*state.active_sink.load(Ordering::Acquire);
+                let Some(_sink_lease) = sink.gate.try_enter() else {
+                    continue;
+                };
+                let status =
+                    ExtAudioFileWriteAsync(sink.file.load(Ordering::Acquire), frames, list);
+                if status == NO_ERR {
+                    sink.written_frames
+                        .fetch_add(u64::from(frames), Ordering::Release);
+                }
+                break status;
+            }
+        };
         state.counters.complete_write(frames, status);
-        NO_ERR
     }
 
     pub(super) fn system_tap_description(process_id: AudioObjectID) -> Retained<CATapDescription> {
@@ -1483,6 +1869,7 @@ pub(crate) mod native {
                 counters.complete_write(48_000, status);
                 Some(Box::new(CallbackState {
                     file: ptr::null_mut(),
+                    active_sink: AtomicPtr::new(ptr::null_mut()),
                     bytes_per_frame: 4,
                     gate: CallbackGate::default(),
                     counters,
@@ -1507,6 +1894,11 @@ pub(crate) mod native {
                 microphone_callback: callback(0),
                 microphone_started: false,
                 started_at,
+                segmented: false,
+                system_segments: None,
+                microphone_segments: None,
+                rotation_warnings: Vec::new(),
+                finalized_segments: Vec::new(),
             };
             let files = recording.stop().unwrap();
             assert_eq!(files.microphone, PathBuf::from("microphone.m4a"));

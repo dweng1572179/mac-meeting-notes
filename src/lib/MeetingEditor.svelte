@@ -13,21 +13,56 @@
       ? 'enhanced'
       : current;
   }
+
+  export function dirtyAiNotesDraft(
+    editing: boolean,
+    draft: string,
+    savedNotes: string
+  ): string | undefined {
+    return editing && draft !== savedNotes ? draft : undefined;
+  }
+
+  export async function flushMeetingDrafts(
+    flushOriginal: () => Promise<void>,
+    readAiDraft: () => string | undefined,
+    saveAiDraft: (draft: string) => Promise<void>
+  ): Promise<void> {
+    await flushOriginal();
+    const aiDraft = readAiDraft();
+    if (aiDraft !== undefined) await saveAiDraft(aiDraft);
+  }
+
+  export type SuggestionKey = 'title' | 'context' | 'category' | 'participants';
+  export type MeetingMetadata = { title: string; context: string; folder: string; attendees: string };
+
+  export function metadataAfterSuggestion(
+    current: MeetingMetadata,
+    key: SuggestionKey,
+    updated: MeetingMetadata
+  ): MeetingMetadata {
+    if (key === 'title') return { ...current, title: updated.title };
+    if (key === 'context') return { ...current, context: updated.context };
+    if (key === 'category') return { ...current, folder: updated.folder };
+    return { ...current, attendees: updated.attendees };
+  }
 </script>
 
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import {
     askMeeting,
+    applySuggestion,
     createCloseHandler,
     destroyCurrentWindow,
     exportMarkdown,
     onWindowCloseRequested,
+    refreshInsights,
+    saveAiNotes,
     saveSession
   } from './api';
   import { createAutosave } from './autosave';
   import { parseMeetingMarkdown } from './markdown';
-  import { meetingMarkdown } from './meeting-workspace';
+  import { aiNotes, meetingMarkdown, meetingViewLabel } from './meeting-workspace';
   import MeetingQuestion from './MeetingQuestion.svelte';
   import { errorMessage } from './recovery';
   import RecordingDock, { captureCoverage } from './RecordingDock.svelte';
@@ -76,6 +111,14 @@
   let menuExporting = $state(false);
   let menuExportStatus = $state('');
   let menuExportError = $state(false);
+  let editingAiNotes = $state(false);
+  let aiNotesDraft = $state('');
+  let aiNotesSaving = $state(false);
+  let aiNotesSave: Promise<void> | null = null;
+  let aiNotesError = $state('');
+  let suggestionPending = $state('');
+  let suggestionError = $state('');
+  let refreshing = $state(false);
   let actionMenu: HTMLDivElement;
   let confirmationDialog: HTMLDialogElement;
 
@@ -153,7 +196,11 @@
   }
 
   export async function flush() {
-    await autosave.flush();
+    await flushMeetingDrafts(async () => {
+      await autosave.flush();
+      if (aiNotesSave) await aiNotesSave;
+    },
+      () => dirtyAiNotesDraft(editingAiNotes, aiNotesDraft, aiNotes(session) ?? ''), saveAiNotesValue);
   }
 
   function currentSession(): Session {
@@ -175,6 +222,83 @@
   async function askCurrentMeeting(question: string) {
     await flush();
     return askMeeting(session.id, question);
+  }
+
+  function beginAiNoteEdit() {
+    aiNotesDraft = aiNotes(session) ?? '';
+    aiNotesError = '';
+    editingAiNotes = true;
+  }
+
+  function saveAiNotesValue(notes: string | null): Promise<void> {
+    if (aiNotesSave) return aiNotesSave;
+    aiNotesSaving = true;
+    aiNotesError = '';
+    aiNotesSave = (async () => {
+      try {
+        const updated = await saveAiNotes(session.id, notes);
+        onSessionChange(updated);
+        aiNotesDraft = aiNotes(updated) ?? '';
+        editingAiNotes = false;
+      } catch (error) {
+        aiNotesError = errorMessage(error, 'AI notes could not be saved. Your typed notes were kept.');
+        throw error;
+      } finally {
+        aiNotesSaving = false;
+        aiNotesSave = null;
+      }
+    })();
+    return aiNotesSave;
+  }
+
+  async function persistAiNotes(notes: string | null) {
+    aiNotesSaving = true;
+    try {
+      await autosave.flush();
+      await saveAiNotesValue(notes);
+    } catch {
+      // The editor stays open with its draft and the inline error offers another save attempt.
+    } finally {
+      aiNotesSaving = false;
+    }
+  }
+
+  async function changeSuggestion(key: SuggestionKey, action: 'apply' | 'dismiss') {
+    suggestionPending = `${key}:${action}`;
+    suggestionError = '';
+    try {
+      await flush();
+      const updated = await applySuggestion(session.id, key, action);
+      onSessionChange(updated);
+      if (action === 'apply') {
+        ({ title, context, folder, attendees } = metadataAfterSuggestion(
+          { title, context, folder, attendees },
+          key,
+          { title: updated.title, context: updated.context, folder: updated.folder, attendees: updated.attendees.join(', ') }
+        ));
+      }
+    } catch (error) {
+      suggestionError = errorMessage(error, 'The suggestion could not be changed. Try again.');
+    } finally {
+      suggestionPending = '';
+    }
+  }
+
+  async function refreshMeetingInsights() {
+    actionMenu.hidePopover();
+    refreshing = true;
+    menuExportError = false;
+    menuExportStatus = '';
+    try {
+      await flush();
+      onSessionChange(await refreshInsights(session.id));
+      menuExportStatus = 'AI notes and suggestions refreshed from saved text.';
+    } catch (error) {
+      menuExportError = true;
+      menuExportStatus = errorMessage(error, 'AI notes could not be refreshed. Your saved text was kept.');
+    } finally {
+      refreshing = false;
+    }
   }
 
   async function exportFromMenu() {
@@ -237,6 +361,9 @@
       <button type="button" disabled={menuExporting} onclick={exportFromMenu}>
         {menuExporting ? 'Saving…' : 'Export Markdown'}
       </button>
+      {#if session.status === 'complete' && (session.transcript || session.originalNotes || session.enrichedNotes)}
+        <button type="button" disabled={refreshing} onclick={refreshMeetingInsights}>{refreshing ? 'Refreshing…' : 'Refresh AI notes'}</button>
+      {/if}
       <button
         class="danger-action"
         type="button"
@@ -260,36 +387,43 @@
       value={title}
       oninput={updateTitle}
       aria-labelledby="meeting-title-label"
-      rows="2"
+      rows="1"
+      disabled={Boolean(suggestionPending)}
     ></textarea>
+    {#if session.aiSuggestions?.title && !(session.dismissedSuggestions ?? []).includes('title')}
+      <div class="field-suggestion title-suggestion">
+        <span>Suggested title: <strong>{session.aiSuggestions.title.value}</strong></span>
+        <div><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('title', 'apply')}>Use</button><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('title', 'dismiss')}>Dismiss</button></div>
+      </div>
+    {/if}
 
     <div class="document-fields">
       <label>
-        <span>Attendees</span>
-        <input
-          value={attendees}
-          oninput={updateAttendees}
-          placeholder="Add names, separated by commas"
-        />
+        <span>Participants</span>
+        <span class="field-control"><input value={attendees} oninput={updateAttendees} placeholder="Add names, separated by commas" disabled={Boolean(suggestionPending)} />
+          {#if session.aiSuggestions?.participants.length && !(session.dismissedSuggestions ?? []).includes('participants')}
+            <span class="field-suggestion"><span>Suggested: <strong>{session.aiSuggestions.participants.map((item) => item.name).join(', ')}</strong></span><span><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('participants', 'apply')}>Add</button><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('participants', 'dismiss')}>Dismiss</button></span></span>
+          {/if}
+        </span>
       </label>
       <label>
         <span>Context</span>
-        <textarea
-          value={context}
-          oninput={updateContext}
-          rows="2"
-          placeholder="What should this meeting accomplish?"
-        ></textarea>
+        <span class="field-control"><textarea value={context} oninput={updateContext} rows="1" placeholder="What should this meeting accomplish?" disabled={Boolean(suggestionPending)}></textarea>
+          {#if session.aiSuggestions?.context && !(session.dismissedSuggestions ?? []).includes('context')}
+            <span class="field-suggestion"><span>Suggested: <strong>{session.aiSuggestions.context.value}</strong></span><span><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('context', 'apply')}>Use</button><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('context', 'dismiss')}>Dismiss</button></span></span>
+          {/if}
+        </span>
       </label>
       <label>
-        <span>Folder</span>
-        <input
-          value={folder}
-          oninput={updateFolder}
-          placeholder="Acquisitions, leasing, or another project"
-        />
+        <span>Category</span>
+        <span class="field-control"><input value={folder} oninput={updateFolder} placeholder="Acquisitions, leasing, or another project" disabled={Boolean(suggestionPending)} />
+          {#if session.aiSuggestions?.category && !(session.dismissedSuggestions ?? []).includes('category')}
+            <span class="field-suggestion"><span>Suggested: <strong>{session.aiSuggestions.category.value}</strong></span><span><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('category', 'apply')}>Use</button><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('category', 'dismiss')}>Dismiss</button></span></span>
+          {/if}
+        </span>
       </label>
     </div>
+    {#if suggestionError}<p class="suggestion-error" role="alert">{suggestionError}</p>{/if}
   </header>
 
   <RecordingDock
@@ -305,15 +439,16 @@
   />
 
   {#if session.captureHealth || session.warnings?.length}
-    <aside class="capture-health" aria-label="Saved recording coverage">
+    <details class="capture-disclosure">
+      <summary>Details and notices{session.warnings?.length ? ` · ${session.warnings.length} ${session.warnings.length === 1 ? 'notice' : 'notices'}` : ''}</summary>
       {#if session.captureHealth}<p>{captureCoverage(session.captureHealth)}</p>{/if}
       {#each session.warnings ?? [] as warning}<p>{warning}</p>{/each}
-    </aside>
+    </details>
   {/if}
 
   <section class="notes-section" aria-labelledby="notes-title">
     <div class="notes-heading-row">
-      <h2 id="notes-title">Notes</h2>
+      <div><h2 id="notes-title">{meetingViewLabel(view)}</h2><p class="view-description">{view === 'original' ? 'Notes you wrote yourself.' : view === 'enhanced' ? 'Editable notes generated from saved meeting text.' : 'Saved words organized for reading.'}</p></div>
       {#if session.status === 'complete' || session.transcript !== null}
         <div class="result-switch" aria-label="Note version">
           <button
@@ -321,14 +456,14 @@
             class:active={view === 'original'}
             aria-pressed={view === 'original'}
             onclick={() => (view = 'original')}
-          >Original</button>
+          >Your notes</button>
           {#if session.status === 'complete'}
             <button
               type="button"
               class:active={view === 'enhanced'}
               aria-pressed={view === 'enhanced'}
               onclick={() => (view = 'enhanced')}
-            >Enhanced</button>
+            >AI notes</button>
           {/if}
           {#if session.transcript !== null}
             <button
@@ -343,14 +478,17 @@
     </div>
 
     {#if view === 'transcript' && session.transcript !== null}
-      <TranscriptView
-        transcript={session.transcript}
-        partial={session.status !== 'complete'}
-        onExport={exportCurrentMeeting}
-      />
-    {:else if view === 'enhanced' && session.enrichedNotes}
+      <TranscriptView {session} onExport={exportCurrentMeeting} />
+    {:else if view === 'enhanced'}
+      <div class="ai-notes-toolbar">
+        {#if !editingAiNotes}<button type="button" disabled={aiNotesSaving} onclick={beginAiNoteEdit}>Edit AI notes</button>{/if}
+        {#if session.editedEnrichedNotes !== null && session.editedEnrichedNotes !== undefined && !editingAiNotes}<button type="button" disabled={aiNotesSaving} onclick={() => persistAiNotes(null)}>Restore generated</button>{/if}
+      </div>
+      {#if editingAiNotes}
+        <div class="ai-notes-editor"><textarea bind:value={aiNotesDraft} rows="12" dir="auto" disabled={aiNotesSaving}></textarea><div><button type="button" disabled={aiNotesSaving} onclick={() => (editingAiNotes = false)}>Cancel</button><button class="primary" type="button" disabled={aiNotesSaving} onclick={() => persistAiNotes(aiNotesDraft)}>{aiNotesSaving ? 'Saving…' : 'Save AI notes'}</button></div></div>
+      {:else if aiNotes(session)}
       <div class="enhanced-notes" dir="auto">
-        {#each parseMeetingMarkdown(session.enrichedNotes) as block}
+        {#each parseMeetingMarkdown(aiNotes(session) ?? '') as block}
           {#if block.kind === 'heading'}
             <h3>{block.text}</h3>
           {:else if block.kind === 'bullet'}
@@ -360,15 +498,20 @@
           {/if}
         {/each}
       </div>
+      {:else}
+        <div class="notes-empty"><p>No AI notes are saved for this meeting.</p>{#if session.status === 'complete'}<button type="button" onclick={refreshMeetingInsights}>Create from saved text</button>{/if}</div>
+      {/if}
+      {#if aiNotesError}<p class="deletion-error" role="alert">{aiNotesError}</p>{/if}
     {:else}
       <label class="sr-only" for="original-notes">Original meeting notes</label>
       <textarea
         class="notes-editor"
+        class:empty={!originalNotes}
         id="original-notes"
         value={originalNotes}
         oninput={updateNotes}
         onfocus={markOriginalUse}
-        placeholder="Start with the questions, numbers, and decisions you want to remember."
+        placeholder={originalNotes ? '' : ['complete', 'failed'].includes(session.status) ? 'You didn’t type notes during this meeting. Add anything you want to keep.' : 'Start with the questions, numbers, and decisions you want to remember.'}
         spellcheck="true"
         dir="auto"
       ></textarea>
@@ -404,7 +547,7 @@
     </h2>
     <p class="settings-copy">
       {#if confirmation === 'transcript'}
-        The transcript and enhanced notes will be permanently removed. Your original notes and any retained audio will stay.
+        The transcript and AI notes will be permanently removed. Your notes and any retained audio will stay.
       {:else if session.audioPath !== null || session.microphoneAudioPath !== null}
         This meeting, its notes, and its retained audio recording will be permanently removed.
       {:else}
@@ -531,5 +674,64 @@
     font-size: 12px;
     font-weight: 700;
     cursor: pointer;
+  }
+
+  .field-suggestion {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 7px 0 2px;
+    color: var(--muted-text);
+    font-size: 11px;
+    line-height: 1.4;
+  }
+
+  .field-suggestion strong { color: var(--ink); font-weight: 650; }
+  .field-suggestion > span:last-child,
+  .field-suggestion > div { display: inline-flex; flex: 0 0 auto; gap: 5px; }
+
+  .field-suggestion button,
+  .ai-notes-toolbar button,
+  .ai-notes-editor button,
+  .notes-empty button {
+    padding: 4px 7px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--accent-text);
+    background: var(--accent-soft);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .field-suggestion button:last-child { color: var(--muted-text); background: transparent; }
+  .field-suggestion button:disabled { cursor: wait; opacity: .55; }
+  .title-suggestion { max-width: 720px; padding-top: 9px; }
+  .suggestion-error { margin: 8px 0 0 82px; color: var(--danger); font-size: 12px; }
+
+  .capture-disclosure {
+    max-width: 720px;
+    margin-top: 18px;
+    color: var(--muted-text);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .capture-disclosure summary { width: fit-content; cursor: pointer; font-weight: 650; }
+  .capture-disclosure p { margin: 7px 0 0; }
+
+  .ai-notes-toolbar { display: flex; justify-content: flex-end; gap: 6px; min-height: 27px; margin-bottom: 7px; }
+  .ai-notes-toolbar button { color: var(--muted-text); background: transparent; }
+  .ai-notes-editor { display: grid; gap: 9px; }
+  .ai-notes-editor textarea { width: 100%; min-height: 260px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; resize: vertical; color: var(--ink); background: color-mix(in srgb, var(--paper) 76%, var(--sidebar)); font: inherit; font-size: 15px; line-height: 1.65; }
+  .ai-notes-editor > div { display: flex; justify-content: flex-end; gap: 7px; }
+  .ai-notes-editor button.primary { color: #fff; background: var(--accent-text); }
+  .notes-empty { padding: 30px 0 50px; color: var(--muted-text); }
+  .notes-empty p { margin: 0 0 12px; }
+
+  @media (max-width: 680px) {
+    .field-suggestion { align-items: flex-start; flex-direction: column; gap: 5px; }
+    .suggestion-error { margin-left: 0; }
   }
 </style>

@@ -20,11 +20,39 @@ const basePreviewSession: Session = {
   context: '[SIMULATION] Initial acquisition review for a regional distribution property.',
   attendees: ['Alex Morgan', 'Jordan Lee', 'Sam Rivera'],
   folder: 'Acquisitions',
-  originalNotes:
-    '[SIMULATION]\n\nConfirm tenant rollover exposure and request the latest roof inspection. Underwrite the south bay at market rent.',
-  transcript: null,
+  originalNotes: '',
+  transcript: '[SIMULATION]\n\n[00:00:04 – 00:00:22] Microphone:\nThe current rent roll is still outstanding, so we should not finalize underwriting today.\n\n[00:00:24 – 00:00:47] System audio:\nAgreed. We can advance to detailed review while the roof report and tenant rollover schedule remain open.\n\n[00:00:49 – 00:01:08] Microphone:\nJordan will request both documents by Friday, and Alex will revisit the south-bay rent assumption.',
   enrichedNotes:
-    '## Decision\n\nAdvance to a detailed underwriting review.\n\n## Follow-ups\n\n- Request the current rent roll and roof report\n- Revisit the south-bay rent assumption',
+    '## Decision\n\nAdvance to detailed underwriting, but do not finalize until the rent roll and roof report are reviewed.\n\n## Follow-ups\n\n- Priya: request the current rent roll and roof report by Friday\n- Alex: revisit the south-bay rent assumption\n\n## Open questions\n\n- Confirm tenant rollover exposure after the updated schedule arrives',
+  editedEnrichedNotes: null,
+  aiSuggestions: {
+    title: { value: '[SIMULATION] Riverside underwriting review', evidence: [{ sourceId: 'microphone:segment-0:offset-0:turn-a', excerpt: 'The current rent roll is still outstanding' }] },
+    context: { value: '[SIMULATION] Review open diligence items before final underwriting.', evidence: [{ sourceId: 'system:segment-0:offset-0:turn-b', excerpt: 'the roof report and tenant rollover schedule remain open' }] },
+    category: { value: 'Underwriting', evidence: [{ sourceId: 'system:segment-0:offset-0:turn-b', excerpt: 'advance to detailed review' }] },
+    participants: [
+      { name: 'Priya Shah', speakerKey: 'microphone:segment-1:offset-48000:B', evidence: [{ sourceId: 'microphone:segment-1:offset-48000:turn-c', excerpt: 'Priya will request both documents by Friday' }] }
+    ],
+    topics: [
+      { title: 'Open diligence', startsAtTurnId: 'microphone:segment-0:offset-0:turn-a', evidence: [{ sourceId: 'microphone:segment-0:offset-0:turn-a', excerpt: 'rent roll is still outstanding' }] },
+      { title: 'Owners and next steps', startsAtTurnId: 'microphone:segment-1:offset-48000:turn-c', evidence: [{ sourceId: 'microphone:segment-1:offset-48000:turn-c', excerpt: 'Jordan will request both documents by Friday' }] }
+    ]
+  },
+  dismissedSuggestions: [],
+  transcription: [
+    { source: 'microphone', chunks: [
+      { startSeconds: 0, durationSeconds: 24, segmentIndex: 0, transcript: 'The current rent roll is still outstanding, so we should not finalize underwriting today.', segments: [
+        { id: 'turn-a', speaker: 'A', startSeconds: 4, endSeconds: 22, text: 'The current rent roll is still outstanding, so we should not finalize underwriting today.' }
+      ] },
+      { startSeconds: 48, durationSeconds: 24, segmentIndex: 1, transcript: 'Priya will request both documents by Friday, and Alex will revisit the south-bay rent assumption.', segments: [
+        { id: 'turn-c', speaker: 'B', startSeconds: 1, endSeconds: 20, text: 'Priya will request both documents by Friday, and Alex will revisit the south-bay rent assumption.' }
+      ] }
+    ] },
+    { source: 'system', chunks: [
+      { startSeconds: 0, durationSeconds: 48, segmentIndex: 0, transcript: 'Agreed. We can advance to detailed review while the roof report and tenant rollover schedule remain open.', segments: [
+        { id: 'turn-b', speaker: 'A', startSeconds: 24, endSeconds: 47, text: 'Agreed. We can advance to detailed review while the roof report and tenant rollover schedule remain open.' }
+      ] }
+    ] }
+  ],
   status: 'complete',
   error: null,
   audioPath: null,
@@ -33,7 +61,7 @@ const basePreviewSession: Session = {
 
 const isNative = () => '__TAURI_INTERNALS__' in window;
 let previewSession: Session | undefined;
-export const defaultTranscriptionSettings: TranscriptionSettings = { language: '', vocabulary: '', model: 'gpt-4o-mini-transcribe' };
+export const defaultTranscriptionSettings: TranscriptionSettings = { language: '', vocabulary: '', model: 'gpt-4o-transcribe-diarize' };
 let previewSettings = { ...defaultTranscriptionSettings };
 
 function previewState(): Session {
@@ -49,8 +77,14 @@ function previewState(): Session {
       ? basePreviewSession.endedAt
       : null,
     transcript: ['complete', 'failed'].includes(selectedStatus)
-      && failure !== 'no_speech' ? '[SIMULATION] The team agreed to continue underwriting and request the latest property documents.'
+      && failure !== 'no_speech' ? basePreviewSession.transcript
       : null,
+    transcription: ['complete', 'failed'].includes(selectedStatus) && failure !== 'no_speech'
+      ? basePreviewSession.transcription
+      : [],
+    aiSuggestions: selectedStatus === 'complete' ? basePreviewSession.aiSuggestions : null,
+    dismissedSuggestions: [],
+    editedEnrichedNotes: null,
     enrichedNotes: selectedStatus === 'complete' ? basePreviewSession.enrichedNotes : null,
     status: selectedStatus,
     error:
@@ -101,6 +135,12 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
       error: null,
       warnings: [],
       transcription: [],
+      aiSuggestions: null,
+      dismissedSuggestions: [],
+      editedEnrichedNotes: null,
+      captureSegments: [],
+      segmentedCapture: false,
+      liveTranscriptionError: null,
       captureHealth: null,
       status: 'draft'
     };
@@ -115,6 +155,40 @@ export async function saveSession(input: UpdateSessionInput): Promise<Session> {
     return previewSession;
   }
   return invoke<Session>('save_session', { input });
+}
+
+export async function saveAiNotes(id: string, notes: string | null): Promise<Session> {
+  if (!isNative()) {
+    previewSession = { ...(previewSession ?? previewState()), id, editedEnrichedNotes: notes };
+    return previewSession;
+  }
+  return invoke<Session>('save_ai_notes', { id, notes });
+}
+
+export async function applySuggestion(id: string, key: string, action: 'apply' | 'dismiss'): Promise<Session> {
+  if (!isNative()) {
+    const source = previewSession ?? previewState();
+    const next = { ...source, id, dismissedSuggestions: [...new Set([...(source.dismissedSuggestions ?? []), key])] };
+    if (action === 'apply' && source.aiSuggestions) {
+      const suggestions = source.aiSuggestions;
+      if (key === 'title' && suggestions.title) next.title = suggestions.title.value;
+      if (key === 'context' && suggestions.context) next.context = suggestions.context.value;
+      if (key === 'category' && suggestions.category) next.folder = suggestions.category.value;
+      if (key === 'participants') next.attendees = [...new Set([...source.attendees, ...suggestions.participants.map(({ name }) => name)])];
+    }
+    previewSession = next;
+    return next;
+  }
+  return invoke<Session>('apply_suggestion', { id, key, action });
+}
+
+export async function refreshInsights(id: string): Promise<Session> {
+  if (!isNative()) {
+    await previewDelay();
+    previewSession = { ...(previewSession ?? previewState()), id, status: 'complete', error: null };
+    return previewSession;
+  }
+  return invoke<Session>('refresh_insights', { id });
 }
 
 export async function startRecording(id: string): Promise<RecordingInfo> {
@@ -171,6 +245,13 @@ export async function deleteTranscript(id: string): Promise<Session> {
       id,
       transcript: null,
       enrichedNotes: null,
+      editedEnrichedNotes: null,
+      aiSuggestions: null,
+      dismissedSuggestions: [],
+      transcription: [],
+      captureSegments: [],
+      segmentedCapture: false,
+      liveTranscriptionError: null,
       status: 'draft',
       error: null
     };

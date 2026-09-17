@@ -1,4 +1,5 @@
 import type { Session } from './types';
+import { aiNotes } from './meeting-workspace';
 
 export function foldersFor(sessions: Session[]): string[] {
   return [...new Set(sessions.map(({ folder }) => folder.trim()).filter(Boolean))].sort((left, right) =>
@@ -16,7 +17,7 @@ export function matchesMeeting(session: Session, query: string): boolean {
   if (!needle) return true;
   // ponytail: linear local search fits a personal library; index only when library size makes typing slow.
   return [session.title, session.context, session.folder, ...session.attendees, session.originalNotes,
-    session.enrichedNotes ?? '', session.transcript ?? ''].some((value) => normalize(value).includes(needle));
+    aiNotes(session) ?? '', session.transcript ?? ''].some((value) => normalize(value).includes(needle));
 }
 
 export function meetingStatusLabel(session: Session): string {

@@ -1,21 +1,21 @@
 # Meeting Notes
 
-A lightweight macOS meeting notepad that records your microphone and computer audio while you type. When the meeting ends, it uses your sparse notes as the emphasis signal and turns both sides of the conversation into a useful record.
+A lightweight macOS meeting notepad that records your microphone and computer audio while you type. Transcripts arrive section by section during the meeting. After you stop, it turns the conversation and your notes into a record you can review and edit.
 
 ## What it does
 
 - Captures the default microphone and Mac computer audio together without inviting a meeting bot.
-- Splits each source into approximately five-minute native AAC chunks, transcribes them sequentially, and enriches the conversation around your original notes. Source labels and recording offsets preserve overlapping tracks without inventing a speaker identity.
-- Saves every completed chunk before deleting its temporary audio. Retry resumes saved progress; dense chunks that reach the model output limit are split further.
-- Shows live missing/stalled-source warnings and separate elapsed/captured durations; retains partial-capture warnings with the meeting.
-- Keeps Original, Enhanced, and searchable Transcript views in a local meeting library that survives app restarts. Partial transcripts stay visible when processing fails.
-- Exports a complete Markdown copy to Downloads, including original notes, transcript, context, and capture warnings; incomplete processing is clearly labeled.
-- Saves transcription language, names/vocabulary, and an optional higher-accuracy model. Standard lower-cost transcription remains the default.
-- Organizes meetings with simple local folders and a timeline-style All meetings view.
-- Answers questions about one meeting, a folder, or the latest completed meetings, with exact-source citations. Questions include the complete saved source text within an explicit size budget; oversized selections produce a clear error instead of silently dropping later decisions.
-- Searches titles, attendees, folders, original notes, enhanced notes, and transcripts; accented names can be found without typing accent marks.
-- Offers specific recovery actions for missing keys, interrupted transcription, enrichment failures, and no-speech recordings. Saved progress and typed notes stay intact.
-- Deletes raw audio after successful transcription. Failed transcription can retain audio locally so you can retry.
+- Finalizes native AAC sections around every 60 seconds and transcribes them sequentially while recording continues. Stop saves the final tails and finishes pending work; this is section-based transcription, not word-by-word live captions.
+- Saves each completed transcription before deleting its audio. Ordinary retries reuse saved progress; dense sections that reach the model output limit are split further. A network failure pauses transcription without stopping capture.
+- Shows missing/stalled-source warnings and separate elapsed/captured durations. Partial transcripts and capture warnings survive interruptions.
+- Separates **Your notes**, **AI notes**, and **Transcript**. Typed notes stay yours; editable AI notes retain their generated baseline, and an empty typed-notes view says when no notes were entered.
+- Displays timed speaker turns when speaker detection is selected, with searchable text, source labels, topic navigation, and access to the raw transcript. Speaker labels are local to each source/upload; matching labels in different sections do not identify the same person.
+- Produces notes plus suggested title, context, category, participants, and topic anchors in one structured enrichment response. Suggestions carry exact supporting excerpts and require your acceptance; they never silently replace manual fields. Suggestions without verified evidence are omitted while usable notes are kept.
+- Refreshes AI notes and suggestions for completed meetings from saved transcript text. This does not recreate missing audio or add genuine speaker attribution to older plain transcripts. Your AI-note edits remain separate from refreshed generated notes.
+- Exports Markdown to Downloads with notes, transcript, meeting details, and capture warnings. Incomplete processing is labeled.
+- Saves language and recognition preferences. New installations with no saved preferences default to speaker detection; existing saved choices remain unchanged. Text-only options retain vocabulary hints.
+- Organizes meetings with local categories/folders, a timeline-style library, and search across meeting details, notes, and transcripts.
+- Answers meeting and library questions with exact-source citations. Oversized source selections produce a clear error instead of silently dropping later decisions. The meeting question composer supports Command/Ctrl+Enter and keeps answers with expandable sources while the view is open.
 
 ## Privacy
 
@@ -48,7 +48,14 @@ Future launches work normally from Applications. Updates to this ad-hoc signed b
 
 ## Language, accents, and terminology
 
-Open **Settings → Transcription** to choose automatic detection or a spoken language, add names and terminology (up to 2,000 characters), and select Standard (`gpt-4o-mini-transcribe`) or Higher accuracy (`gpt-4o-transcribe`). The latter costs more through your own OpenAI account. These controls can guide recognition of accented speech and uncommon words; they do not train a personal voice model or guarantee accuracy. Use automatic detection for mixed-language meetings.
+Open **Settings → Transcription** to choose automatic detection or a spoken language and one of these recognition modes:
+
+- **Speaker detection** (`gpt-4o-transcribe-diarize`): timed speaker turns, with identities scoped to each source and uploaded section. It does not support vocabulary prompts; saved vocabulary is retained for text-only modes.
+- **Text only · lowest cost** (`gpt-4o-mini-transcribe`) or **Text only · higher accuracy** (`gpt-4o-transcribe`): plain transcription with optional names and terminology, up to 2,000 characters.
+
+New/unset preferences choose speaker detection. Explicitly saved preferences and historical recordings keep their earlier meaning. Recognition settings do not train a personal voice model or guarantee accent accuracy. Use automatic detection for mixed-language meetings.
+
+OpenAI bills transcription for each uploaded audio track. Enrichment uses one `gpt-4.1-mini-2025-04-14` structured response after transcription finishes, or when you explicitly refresh a completed meeting. The app does not repeatedly summarize the whole meeting during recording. Recognition mode, audio duration, question usage, refreshes, and retries affect your API bill.
 
 Settings apply when a new recording starts. Normal retries keep that recording's settings and skip saved chunks. An explicit retry after **No speech detected** uses your current settings and retranscribes only empty results; this can incur another API charge. A source with zero captured frames cannot be recovered by transcription. **New meeting** starts a separate note without deleting the old one.
 
@@ -76,7 +83,11 @@ The repeatable labeled simulation and expected results are in [`docs/evaluation.
 
 ## Storage
 
-Meeting metadata, original notes, transcripts, and enhanced notes are stored locally in the app's macOS application-data directory. Raw source audio is retained until its chunks have been safely checkpointed in the session JSON. Temporary chunk audio is deleted only after that chunk’s transcript is persisted. Failed or interrupted work keeps pending source audio; retry skips completed chunks. A failure between the API response and the durable checkpoint can require that uncheckpointed request again. Deleting a meeting also deletes its contained retained audio. The API key is stored separately in macOS Keychain.
+Meeting metadata, your notes, raw transcripts, generated AI notes, your AI-note edits, suggestions, and transcription progress are stored locally in the app's macOS application-data directory. The generated AI-note baseline and your edited version are separate.
+
+New recordings use numbered source sections. A finalized section becomes eligible for transcription only after capture closes and syncs its file. Transcription is atomically saved before successfully checkpointed speech audio can be deleted; silent, failed, or unreadable audio may remain for recovery. Startup/retry can recover unregistered section files and retains unreadable tails with warnings. Legacy whole-file recordings keep their retry path.
+
+A failure between an API response and its durable checkpoint can require that request again. Deleting a meeting also deletes its contained retained audio. The API key is stored separately in macOS Keychain.
 
 ## Limitations
 
@@ -85,16 +96,19 @@ Meeting metadata, original notes, transcripts, and enhanced notes are stored loc
 - Language/vocabulary controls are not an accent benchmark. Physical Bluetooth switching and long real-world capture still need broader validation.
 - Folders and notes are local to one Mac; there are no accounts, shared workspaces, or team sync.
 - This beta is ad-hoc signed but not notarized. macOS 14 requires a one-time right-click **Open**; macOS 15 or later requires trying the first launch, then **System Settings → Privacy & Security → Open Anyway**.
-- Model output can be incomplete or wrong; review enhanced notes against the Original view.
+- Model output can be incomplete or wrong. Review AI notes, suggestions, and speaker turns against the source transcript and Your notes. A supporting quote does not make an inference infallible.
+- Speaker labels are local to each source/upload, not a verified participant directory. Cross-section identity matching and Zoom/Teams name association are not implemented.
+- Completed legacy transcripts can receive refreshed notes and suggestions, but plain text alone cannot recover voice identities.
 
 ## Reliability verification
 
-`cargo test --manifest-path src-tauri/Cargo.toml` covers native decoding of more than ten minutes of synthetic audio, independently valid chunks below the upload limit, middle-chunk API failure/reopen/retry, storage failures, empty and silent sources, source health, and exact safe OpenAI errors with request IDs. No microphone speech is needed.
+`cargo test --manifest-path src-tauri/Cargo.toml` includes native synthetic AAC rotation, concurrent callback/stop boundaries, exact frame totals, safe sink retirement, failed preparation recovery, partial-finalization detection, and the existing more-than-ten-minute decoding/retry checks. Local fixtures also cover durable transcript checkpoints and request/response contracts. No microphone speech is needed for these checks.
 
-An opt-in live test uses macOS `say`, the app’s existing login Keychain entry, and paid OpenAI access. It uses only generated simulation content and cleans its temporary library:
+Opt-in paid tests use macOS `say`, the app’s existing login Keychain entry, and generated simulation content in a disposable library. The legacy long-recording check and the new segmented speaker-detection check run separately:
 
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml --lib live_synthetic_long_recording_with_openai -- --ignored --nocapture --test-threads=1
+cargo test --manifest-path src-tauri/Cargo.toml --lib live_synthetic_segmented_diarization_with_openai -- --ignored --nocapture --test-threads=1
 ```
 
 Chunk offsets describe recorded audio, not guaranteed wall-clock timing through capture gaps. The app cannot reconstruct audio that macOS did not deliver. Silence is different from missing frames; health counters do not prove speech was audible. Persistent no-frame warnings can also mean there is no system audio playing.
@@ -103,8 +117,8 @@ Chunk offsets describe recorded audio, not guaranteed wall-clock timing through 
 
 - Broader ask-all-meetings retrieval beyond the current explicit source budget.
 - Automatic microphone/device reconnection and live input-level feedback.
-- Optional live captions and importing existing audio.
-- Speaker diarization and optional Zoom/Teams participant-name association.
+- Word-by-word live captions and importing existing audio.
+- Cross-section speaker identity matching and optional Zoom/Teams participant-name association.
 - Optional screen-share or visual context.
 - Workspace organization and polish.
 - Stable Developer ID signing and notarization when a signing identity is available.

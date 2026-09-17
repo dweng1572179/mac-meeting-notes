@@ -1,6 +1,83 @@
 import type { Session } from './types';
 
 export type HighlightSegment = { text: string; match: boolean };
+export type TranscriptTurn = {
+  id: string;
+  speakerKey: string | null;
+  speaker: string | null;
+  sectionLabel: string;
+  source: 'system' | 'microphone' | null;
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+};
+
+type TranscriptTrack = {
+  source: 'system' | 'microphone';
+  chunks: {
+    startSeconds: number;
+    durationSeconds?: number;
+    transcript?: string | null;
+    segmentIndex?: number | null;
+    segments?: { id: string; speaker: string; startSeconds: number; endSeconds: number; text: string }[];
+  }[];
+};
+
+export function meetingViewLabel(view: 'original' | 'enhanced' | 'transcript') {
+  return { original: 'Your notes', enhanced: 'AI notes', transcript: 'Transcript' }[view];
+}
+
+export function aiNotes(session: Pick<Session, 'enrichedNotes'> & { editedEnrichedNotes?: string | null }) {
+  return session.editedEnrichedNotes !== null && session.editedEnrichedNotes !== undefined
+    ? session.editedEnrichedNotes
+    : session.enrichedNotes;
+}
+
+export function transcriptTurns(input: TranscriptTrack[] | { transcription?: TranscriptTrack[]; transcript?: string | null } = []): TranscriptTurn[] {
+  const tracks = Array.isArray(input) ? input : input.transcription ?? [];
+  const turns: TranscriptTurn[] = tracks.flatMap((track): TranscriptTurn[] => track.chunks.flatMap((chunk): TranscriptTurn[] => {
+    const chunkKey = chunk.segmentIndex === null || chunk.segmentIndex === undefined
+      ? `${track.source}:offset-${Math.round(chunk.startSeconds * 1000)}`
+      : `${track.source}:segment-${chunk.segmentIndex}:offset-${Math.round(chunk.startSeconds * 1000)}`;
+    const segments = chunk.segments ?? [];
+    if (!segments.length) {
+      return chunk.transcript?.trim() ? [{
+        id: `${chunkKey}:text`,
+        speakerKey: null,
+        speaker: null,
+        sectionLabel: chunk.segmentIndex === null || chunk.segmentIndex === undefined ? 'Saved section' : `Part ${chunk.segmentIndex + 1}`,
+        source: track.source,
+        startSeconds: chunk.startSeconds,
+        endSeconds: chunk.startSeconds + (chunk.durationSeconds ?? 0),
+        text: chunk.transcript
+      }] : [];
+    }
+    return segments.map((segment) => ({
+      id: `${chunkKey}:${segment.id}`,
+      speakerKey: `${chunkKey}:${segment.speaker}`,
+      speaker: segment.speaker,
+      sectionLabel: chunk.segmentIndex === null || chunk.segmentIndex === undefined ? 'Saved section' : `Part ${chunk.segmentIndex + 1}`,
+      source: track.source,
+      startSeconds: chunk.startSeconds + segment.startSeconds,
+      endSeconds: chunk.startSeconds + segment.endSeconds,
+      text: segment.text
+    }));
+  })).sort((left, right) => left.startSeconds - right.startSeconds || left.id.localeCompare(right.id));
+  if (!turns.length && !Array.isArray(input) && input.transcript?.trim()) {
+    return [{ id: 'legacy-transcript', speakerKey: null, speaker: null, sectionLabel: 'Legacy recording', source: null, startSeconds: 0, endSeconds: 0, text: input.transcript }];
+  }
+  return turns;
+}
+
+export function validTopicAnchors<T extends { startsAtTurnId: string }>(topics: T[] = [], turnIds: Set<string>) {
+  return topics.filter((topic) => turnIds.has(topic.startsAtTurnId));
+}
+
+export function legacyTranscriptParagraphs(transcript: string) {
+  return transcript.split(/\n\s*\n/u).map((paragraph) => paragraph.trim()).filter((paragraph) =>
+    Boolean(paragraph) && !paragraph.startsWith('Source tracks overlap in time.')
+  );
+}
 
 export function literalHighlights(text: string, query: string): HighlightSegment[] {
   if (!query) return [{ text, match: false }];
@@ -50,8 +127,8 @@ export function meetingMarkdown(session: Session): string {
   return [
     `# ${safe(session.title || 'Untitled meeting')}`,
     metadata.join('\n'),
-    section('Original notes', session.originalNotes),
-    section('Enhanced notes', session.enrichedNotes),
+    section('Your notes', session.originalNotes),
+    section('AI notes', aiNotes(session)),
     transcriptSection,
     section('Capture warnings', warnings, '_None._')
   ].join('\n\n');
