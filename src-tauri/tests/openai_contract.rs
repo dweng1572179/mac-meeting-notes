@@ -437,3 +437,96 @@ fn json_response(status: u16, body: &str) -> String {
         body.len()
     )
 }
+
+#[test]
+fn product_transcription_multipart_uses_validated_settings_and_bounded_hints() {
+    use meeting_notes_lib::domain::TranscriptionSettings;
+    let path = std::env::temp_dir().join(format!("hints-{}.m4a", uuid::Uuid::new_v4()));
+    std::fs::write(&path, [0, 0, 0, 9, b'm', b'd', b'a', b't', 1]).unwrap();
+    for language in ["", "fr"] {
+        let mut source = session();
+        source.transcription_settings = TranscriptionSettings {
+            language: language.into(),
+            vocabulary: "ZyntriQix".into(),
+            model: "gpt-4o-transcribe".into(),
+        };
+        source.context = format!("Bail commercial {}", "界".repeat(5000));
+        source.attendees = vec!["Élodie".into()];
+        let (url, requests) = local_server(json_response(200, r#"{"text":"spoken notes"}"#));
+        tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url(url).transcribe_session(&path, "test-key", &source),
+        )
+        .unwrap();
+        let body = requests.recv().unwrap().body;
+        assert!(body.contains("gpt-4o-transcribe"));
+        assert!(body.contains("ZyntriQix"));
+        assert!(body.contains("Élodie"));
+        assert!(body.contains("Bail commercial"));
+        assert_eq!(body.contains("name=\"language\""), !language.is_empty());
+        assert!(body.len() < 20_000);
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn meeting_question_includes_late_decisions_and_capture_warnings() {
+    let mut source = session();
+    let decision = "Final decision: postpone until Monday.";
+    source.transcript = Some(format!(
+        "{}\n{decision}",
+        "Earlier discussion. ".repeat(600)
+    ));
+    source.warnings = vec!["Capture interrupted; coverage is incomplete.".into()];
+    let response = json_response(200, &json!({
+        "status": "completed", "output": [{ "content": [{ "type": "output_text", "text": json!({
+            "answer": "Postpone until Monday.", "citations": [{ "session_id": source.id, "excerpt": decision }]
+        }).to_string() }] }]
+    }).to_string());
+    let (url, requests) = local_server(response);
+    let answer = tauri::async_runtime::block_on(OpenAiClient::with_base_url(url).ask_meetings(
+        &[source],
+        "Final decision?",
+        "test-key",
+    ));
+    let payload: Value = serde_json::from_str(&requests.recv().unwrap().body).unwrap();
+    let text = payload["input"][0]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains(decision),
+        "late source material must reach the request"
+    );
+    assert!(text.contains("Capture interrupted; coverage is incomplete."));
+    assert_eq!(answer.unwrap().citations[0].excerpt, decision);
+}
+
+#[test]
+fn meeting_question_rejects_oversized_sources_before_network() {
+    for count in [1, 2] {
+        let mut source = session();
+        source.transcript = Some("界".repeat(34_000 * (3 - count)));
+        let error = tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url("http://127.0.0.1:9/v1").ask_meetings(
+                &vec![source; count],
+                "What happened?",
+                "test-key",
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "question_sources_too_large");
+        assert!(error.message.contains(if count == 1 {
+            "search or export"
+        } else {
+            "smaller"
+        }));
+    }
+    let mut source = session();
+    source.title = "x".repeat(200_001);
+    let error = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url("http://127.0.0.1:9/v1").ask_meetings(
+            &[source],
+            "What happened?",
+            "test-key",
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "question_sources_too_large");
+}

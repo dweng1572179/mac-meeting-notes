@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { foldersFor } from './library';
+  import { foldersFor, matchesMeeting } from './library';
   import type { Session } from './types';
 
   let {
@@ -26,9 +26,7 @@
 
   let query = $state('');
   let filteredSessions = $derived(
-    sessions.filter((session) =>
-      `${session.title} ${session.context}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
-    )
+    sessions.filter((session) => matchesMeeting(session, query))
   );
   let folders = $derived(foldersFor(sessions));
 
@@ -44,7 +42,7 @@
     <button class="wordmark" type="button" onclick={onHome}>Meeting Notes</button>
 
     <label class="search">
-      <span class="sr-only">Search meetings</span>
+      <span class="sr-only">Search meetings, notes, and transcripts</span>
       <svg aria-hidden="true" viewBox="0 0 20 20">
         <circle cx="8.5" cy="8.5" r="5.5"></circle>
         <path d="m12.5 12.5 4 4"></path>
@@ -83,7 +81,7 @@
   {/if}
 
   <div class="recent">
-    <h2>Recent</h2>
+    <h2>{query.trim() ? 'Search results' : 'Recent'}</h2>
     {#if filteredSessions.length}
       <ul>
         {#each filteredSessions as session (session.id)}

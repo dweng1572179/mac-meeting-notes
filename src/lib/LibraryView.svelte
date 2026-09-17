@@ -1,6 +1,7 @@
 <script lang="ts">
   import { askMeetings } from './api';
-  import { sessionsForFolder } from './library';
+  import { sessionsForFolder, meetingStatusLabel } from './library';
+  import { errorMessage } from './recovery';
   import type { MeetingAnswer, Session } from './types';
 
   let {
@@ -33,11 +34,12 @@
   function meetingDetail(session: Session) {
     if (session.attendees.length) return session.attendees.join(', ');
     if (session.context.trim()) return session.context.trim();
-    return session.status === 'complete' ? 'Meeting notes ready' : 'Draft meeting';
+    return meetingStatusLabel(session);
   }
 
   async function ask(event: SubmitEvent) {
     event.preventDefault();
+    if (asking) return;
     if (!question.trim()) return;
     if (!hasApiKey) {
       onOpenSettings();
@@ -49,10 +51,7 @@
     try {
       answer = await askMeetings(folder, question.trim());
     } catch (error) {
-      askError =
-        error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
-          ? error.message
-          : 'The meeting answer could not be created.';
+      askError = errorMessage(error, 'The meeting answer could not be created. Your question is still here; try again.');
     } finally {
       asking = false;
     }
@@ -87,7 +86,7 @@
               <span class="meeting-row-meta">
                 <time datetime={session.startedAt}>{meetingTime(session.startedAt)}</time>
                 {#if session.status !== 'complete'}
-                  <span class:failed={session.status === 'failed'}>{session.status}</span>
+                  <span class:failed={session.status === 'failed' && session.error?.code !== 'no_speech'}>{meetingStatusLabel(session)}</span>
                 {/if}
               </span>
             </button>
@@ -114,6 +113,10 @@
       <textarea
         id="meeting-question"
         bind:value={question}
+        maxlength="2000"
+        disabled={asking}
+        dir="auto"
+        oninput={() => { answer = null; askError = ''; }}
         rows="3"
         placeholder="What decisions are still waiting on follow-up?"
       ></textarea>
@@ -126,7 +129,7 @@
       {#if askError}
         <p class="ask-error" role="alert">{askError}</p>
       {:else if answer}
-        <p class="answer-copy">{answer.answer}</p>
+        <p class="answer-copy" dir="auto">{answer.answer}</p>
         {#if answer.citations.length}
           <ol class="citation-list" aria-label="Meeting sources">
             {#each answer.citations as citation}
@@ -140,7 +143,7 @@
           </ol>
         {/if}
       {:else}
-        <p class="ask-hint">Ask across the {folder ? 'meetings in this folder' : 'latest 20 completed meetings'}.</p>
+        <p class="ask-hint">Uses up to the latest 20 completed meetings{folder ? ' in this folder' : ''}. If the saved text is too large, choose a smaller scope; content is never silently cut off.</p>
       {/if}
     </div>
   </aside>

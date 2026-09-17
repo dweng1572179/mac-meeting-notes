@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { foldersFor, sessionsForFolder } from './library';
+import { foldersFor, sessionsForFolder, matchesMeeting, meetingStatusLabel } from './library';
 import type { Session } from './types';
 
 const session = (id: string, folder: string): Session => ({
@@ -17,6 +17,21 @@ const session = (id: string, folder: string): Session => ({
   error: null,
   audioPath: null,
   microphoneAudioPath: null
+});
+
+it('finds names and saved meeting content without requiring accent marks', () => {
+  const note = { ...session('one', 'Research'), attendees: ['José'], originalNotes: 'Follow up', transcript: 'Discussed São Paulo financing.' };
+  expect(matchesMeeting(note, 'jose')).toBe(true);
+  expect(matchesMeeting(note, 'sao paulo')).toBe(true);
+  expect(matchesMeeting(note, 'follow up')).toBe(true);
+  expect(matchesMeeting(note, 'missing')).toBe(false);
+  expect(matchesMeeting(note, '  ')).toBe(true);
+});
+
+it('labels silence and interrupted processing as distinct library outcomes', () => {
+  expect(meetingStatusLabel({ ...session('one', ''), status: 'failed', error: { code: 'no_speech', message: '' } })).toBe('No speech detected');
+  expect(meetingStatusLabel({ ...session('one', ''), status: 'processing' })).toBe('Processing');
+  expect(meetingStatusLabel({ ...session('one', ''), status: 'failed' })).toBe('Needs attention');
 });
 
 describe('meeting folders', () => {

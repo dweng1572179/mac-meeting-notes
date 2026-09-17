@@ -8,6 +8,7 @@ import type {
   RecordingInfo,
   RecordingHealth,
   Session,
+  TranscriptionSettings,
   UpdateSessionInput
 } from './types';
 
@@ -32,8 +33,11 @@ const basePreviewSession: Session = {
 
 const isNative = () => '__TAURI_INTERNALS__' in window;
 let previewSession: Session | undefined;
+export const defaultTranscriptionSettings: TranscriptionSettings = { language: '', vocabulary: '', model: 'gpt-4o-mini-transcribe' };
+let previewSettings = { ...defaultTranscriptionSettings };
 
 function previewState(): Session {
+  const failure = new URLSearchParams(window.location.search).get('failure');
   const status = new URLSearchParams(window.location.search).get('state');
   const selectedStatus = ['draft', 'recording', 'processing', 'complete', 'failed'].includes(status ?? '')
     ? (status as Session['status'])
@@ -45,13 +49,15 @@ function previewState(): Session {
       ? basePreviewSession.endedAt
       : null,
     transcript: ['complete', 'failed'].includes(selectedStatus)
-      ? '[SIMULATION] The team agreed to continue underwriting and request the latest property documents.'
+      && failure !== 'no_speech' ? '[SIMULATION] The team agreed to continue underwriting and request the latest property documents.'
       : null,
     enrichedNotes: selectedStatus === 'complete' ? basePreviewSession.enrichedNotes : null,
     status: selectedStatus,
     error:
       selectedStatus === 'failed'
-        ? { code: 'openai_request', message: '[SIMULATION] Processing could not reach OpenAI.' }
+        ? failure === 'no_speech' ? { code: 'no_speech', message: 'No speech was detected. Your typed notes and source audio were kept.' }
+          : failure === 'invalid_api_key' ? { code: 'invalid_api_key', message: 'OpenAI rejected this API key. Request ID: req_simulation' }
+          : { code: 'openai_request', message: '[SIMULATION] Processing could not reach OpenAI.' }
         : null,
     audioPath: ['recording', 'processing', 'failed'].includes(selectedStatus)
       ? '/tmp/simulation-riverside-logistics.m4a'
@@ -69,7 +75,8 @@ export async function bootstrap(): Promise<Bootstrap> {
     previewSession = previewState();
     return {
       sessions: new URLSearchParams(window.location.search).has('empty') ? [] : [previewSession],
-      hasApiKey: new URLSearchParams(window.location.search).has('key')
+      hasApiKey: new URLSearchParams(window.location.search).has('key'),
+      settings: previewSettings
     };
   }
   return invoke<Bootstrap>('bootstrap');
@@ -88,6 +95,13 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
       folder: '',
       originalNotes: '',
       enrichedNotes: null,
+      transcript: null,
+      audioPath: null,
+      microphoneAudioPath: null,
+      error: null,
+      warnings: [],
+      transcription: [],
+      captureHealth: null,
       status: 'draft'
     };
     return previewSession;
@@ -173,6 +187,29 @@ export async function saveApiKey(key: string): Promise<void> {
 export async function hasApiKey(): Promise<boolean> {
   if (!isNative()) return false;
   return invoke<boolean>('has_api_key');
+}
+
+export async function saveTranscriptionSettings(settings: TranscriptionSettings): Promise<TranscriptionSettings> {
+  if (!isNative()) { previewSettings = { ...settings }; return previewSettings; }
+  return invoke<TranscriptionSettings>('save_transcription_settings', { settings });
+}
+
+export async function askMeeting(id: string, question: string): Promise<MeetingAnswer> {
+  if (!isNative()) return askMeetings(null, question);
+  return invoke<MeetingAnswer>('ask_meetings', { folder: null, sessionId: id, question });
+}
+
+export async function exportMarkdown(title: string, markdown: string): Promise<string> {
+  if (!isNative()) {
+    const url = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${title.replace(/[^\p{L}\p{N} _-]/gu, '').slice(0, 80) || 'Meeting'}.md`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return 'your browser’s downloads';
+  }
+  return invoke<string>('export_markdown', { title, markdown });
 }
 
 export async function askMeetings(folder: string | null, question: string): Promise<MeetingAnswer> {

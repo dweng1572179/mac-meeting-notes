@@ -11,7 +11,7 @@ use crate::{
     domain::{
         transition_to_failed, transition_to_processing, AppError, AppResult, AudioSource,
         CreateSessionInput, MeetingAnswer, Session, SessionStatus, SourceTranscript,
-        TranscriptChunk, UpdateSessionInput,
+        TranscriptChunk, TranscriptionSettings, UpdateSessionInput,
     },
     openai::{sections_to_markdown, OpenAiClient},
     recorder::{Recorder, RecordingFiles, RecordingInfo},
@@ -27,6 +27,7 @@ const QUESTION_SESSION_LIMIT: usize = 20;
 pub struct Bootstrap {
     pub sessions: Vec<Session>,
     pub has_api_key: bool,
+    pub settings: TranscriptionSettings,
 }
 
 pub struct AppState {
@@ -55,7 +56,75 @@ pub fn bootstrap(state: State<'_, AppState>) -> AppResult<Bootstrap> {
     Ok(Bootstrap {
         sessions: state.store.list()?,
         has_api_key: ApiKeyStore::exists()?,
+        settings: state.store.settings()?,
     })
+}
+
+#[tauri::command]
+pub fn save_transcription_settings(
+    state: State<'_, AppState>,
+    settings: TranscriptionSettings,
+) -> AppResult<TranscriptionSettings> {
+    let _guard = lock_sessions(&state)?;
+    state.store.save_settings(&settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn export_markdown(app: AppHandle, title: String, markdown: String) -> AppResult<String> {
+    let directory = app
+        .path()
+        .download_dir()
+        .map_err(|error| AppError::new("storage_error", error.to_string()))?;
+    export_markdown_to(&directory, &title, &markdown)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn export_markdown_to(
+    directory: &std::path::Path,
+    title: &str,
+    markdown: &str,
+) -> AppResult<PathBuf> {
+    use std::io::Write;
+    if markdown.trim().is_empty() || markdown.len() > 16 * 1024 * 1024 {
+        return Err(AppError::new(
+            "invalid_export",
+            "Export must contain text and be no larger than 16 MiB. Your notes were kept.",
+        ));
+    }
+    let title: String = title
+        .chars()
+        .take(50)
+        .map(|character| {
+            if character.is_alphanumeric() || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = directory.join(format!(
+        "{}-{}.md",
+        if title.is_empty() { "meeting" } else { &title },
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(storage_error)?;
+    if let Err(error) = file
+        .write_all(markdown.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        let _ = fs::remove_file(&path);
+        return Err(storage_error(error));
+    }
+    #[cfg(unix)]
+    fs::File::open(directory)
+        .and_then(|file| file.sync_all())
+        .map_err(storage_error)?;
+    Ok(path)
 }
 
 #[tauri::command]
@@ -220,14 +289,40 @@ pub async fn ask_meetings(
     state: State<'_, AppState>,
     folder: Option<String>,
     question: String,
+    session_id: Option<String>,
 ) -> AppResult<MeetingAnswer> {
-    let question = question.trim();
-    if question.is_empty() {
-        return Err(AppError::new("invalid_question", "Enter a question"));
-    }
+    let question = validate_question(&question)?;
     let sessions = {
         let _guard = lock_sessions(&state)?;
-        eligible_meetings(state.store.list()?, folder.as_deref())
+        question_sources(&state.store, folder.as_deref(), session_id.as_deref())?
+    };
+    let api_key = ApiKeyStore::load()?
+        .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
+    state
+        .openai
+        .ask_meetings(&sessions, question, &api_key)
+        .await
+}
+
+fn validate_question(question: &str) -> AppResult<&str> {
+    let question = question.trim();
+    if question.is_empty() || question.chars().count() > 2000 {
+        return Err(AppError::new(
+            "invalid_question",
+            "Enter a question of 1 to 2000 characters.",
+        ));
+    }
+    Ok(question)
+}
+
+fn question_sources(
+    store: &SessionStore,
+    folder: Option<&str>,
+    session_id: Option<&str>,
+) -> AppResult<Vec<Session>> {
+    let sessions = match session_id {
+        Some(id) => eligible_meetings(vec![store.get(id)?], None),
+        None => eligible_meetings(store.list()?, folder),
     };
     if sessions.is_empty() {
         return Err(AppError::new(
@@ -235,12 +330,7 @@ pub async fn ask_meetings(
             "No completed meetings with source material are available here yet",
         ));
     }
-    let api_key = ApiKeyStore::load()?
-        .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
-    state
-        .openai
-        .ask_meetings(&sessions, question, &api_key)
-        .await
+    Ok(sessions)
 }
 
 fn eligible_meetings(sessions: Vec<Session>, folder: Option<&str>) -> Vec<Session> {
@@ -454,7 +544,13 @@ async fn transcribe_source(
                     "{} could not be fully transcribed. Remaining audio was kept.",
                     source.label()
                 );
-                session.warnings.retain(|warning| warning != &resolved);
+                let empty = format!(
+                    "{} had no transcribed speech. Notes use only the available sources.",
+                    source.label()
+                );
+                session
+                    .warnings
+                    .retain(|warning| warning != &resolved && !(has_speech && warning == &empty));
             })?);
             if !has_speech && !track.chunks.is_empty() {
                 progress(update_processing(state, id, |session| {
@@ -491,7 +587,11 @@ async fn transcribe_source(
                 "Audio preparation was interrupted. Your source audio was kept.",
             )
         })??;
-        match state.openai.transcribe(&output, api_key).await {
+        match state
+            .openai
+            .transcribe_session(&output, api_key, &session)
+            .await
+        {
             Ok(text) => {
                 let saved = update_processing(state, id, |session| {
                     let track = session
@@ -659,6 +759,7 @@ fn persist_recording(
     session.audio_path = Some(audio_path);
     session.microphone_audio_path = Some(microphone_audio_path);
     session.status = SessionStatus::Recording;
+    session.transcription_settings = state.store.settings()?;
     session.started_at = now();
     session.error = None;
     state.store.save(&session)?;
@@ -667,7 +768,29 @@ fn persist_recording(
 
 fn prepare_retry(state: &AppState, id: &str) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
-    let session = retry_start(state.store.get(id)?)?;
+    let mut session = state.store.get(id)?;
+    if session.status == SessionStatus::Failed
+        && session
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "no_speech")
+    {
+        session.transcription_settings = state.store.settings()?;
+        for chunk in session
+            .transcription
+            .iter_mut()
+            .flat_map(|track| &mut track.chunks)
+        {
+            if chunk
+                .transcript
+                .as_ref()
+                .is_some_and(|text| text.trim().is_empty())
+            {
+                chunk.transcript = None;
+            }
+        }
+    }
+    let session = retry_start(session)?;
     state.store.save(&session)?;
     Ok(session)
 }
@@ -1151,6 +1274,40 @@ mod tests {
         assert_eq!(cleaned.microphone_audio_path, None);
         assert!(!system_path.exists());
         assert!(!microphone_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn product_recording_snapshots_current_settings() {
+        let (state, root, id) = state(SessionStatus::Draft);
+        let settings = crate::domain::TranscriptionSettings {
+            language: "fr".into(),
+            vocabulary: "Élodie".into(),
+            model: "gpt-4o-transcribe".into(),
+        };
+        state.store.save_settings(&settings).unwrap();
+        let session = super::persist_recording(
+            &state,
+            &id,
+            root.join("audio")
+                .join(format!("{id}.m4a"))
+                .to_string_lossy()
+                .into_owned(),
+            root.join("audio")
+                .join(format!("{id}-mic.m4a"))
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap();
+        state
+            .store
+            .save_settings(&crate::domain::TranscriptionSettings::default())
+            .unwrap();
+        assert_eq!(session.transcription_settings, settings);
+        assert_eq!(
+            state.store.get(&id).unwrap().transcription_settings,
+            settings
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

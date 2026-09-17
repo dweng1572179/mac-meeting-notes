@@ -12,26 +12,14 @@
     return Math.floor(Math.max(0, (now - startedAt) / 1000, nativeWallSeconds));
   }
 
-  export function captureErrorMessage(error: unknown) {
-    const detail =
-      error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
-        ? error.message
-        : error instanceof Error
-          ? error.message
-          : 'The action could not be completed.';
-    const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
-    if (code === 'microphone_permission') {
-      return `${detail} Open System Settings → Privacy & Security → Microphone, enable Meeting Notes, then try again.`;
-    }
-    return code === 'audio_permission'
-      ? `${detail} Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Meeting Notes, then try again.`
-      : detail;
-  }
+  import { errorMessage } from './recovery';
+  export const captureErrorMessage = errorMessage;
 </script>
 
 <script lang="ts">
   import { onMount } from 'svelte';
   import { retryProcessing, startRecording, stopRecording } from './api';
+  import { processingLabel, recoveryActions } from './recovery';
   import type { RecordingHealth, Session } from './types';
 
   let {
@@ -42,7 +30,8 @@
     onRecordingStarted,
     onFlush,
     onSessionChange,
-    onOpenSettings
+    onOpenSettings,
+    onNewNote
   }: {
     session: Session;
     hasApiKey: boolean;
@@ -52,10 +41,12 @@
     onFlush: () => Promise<void>;
     onSessionChange: (session: Session) => void;
     onOpenSettings: () => void;
+    onNewNote: () => void;
   } = $props();
 
   let pending = $state<'start' | 'stop' | 'retry' | null>(null);
   let actionError = $state('');
+  let recovery = $derived(recoveryActions(session));
   let now = $state(0);
   const initial = <T,>(read: () => T) => read();
   let recordingStarted = $state(initial(() => recordingStartedAt));
@@ -132,10 +123,12 @@
   }
 
   async function retry() {
+    if (pending) return;
     pending = 'retry';
     actionError = '';
     try {
       await onFlush();
+      if (!hasApiKey) { onOpenSettings(); return; }
       onSessionChange(await retryProcessing(session.id));
     } catch (error) {
       actionError = captureErrorMessage(error);
@@ -158,28 +151,52 @@
 {:else if session.status === 'processing'}
   <div class="recording-dock processing" role="status" aria-live="polite">
     <span class="processing-dot" aria-hidden="true"></span>
-    <span>Processing meeting{session.transcription?.length ? ` · ${session.transcription.flatMap((track) => track.chunks).filter((chunk) => chunk.transcript !== null).length}/${session.transcription.flatMap((track) => track.chunks).length} chunks saved` : ''}</span>
+    <span>{processingLabel(session)}</span>
     <span class="processing-line" aria-hidden="true"></span>
   </div>
-{:else if session.status === 'failed' && (session.audioPath !== null || session.microphoneAudioPath !== null || session.transcript !== null)}
-  <div class="failure-dock" role="alert">
-    <p>{session.error?.message ?? 'Processing could not finish.'}</p>
-    <button type="button" disabled={pending !== null} onclick={retry}>
-      {pending === 'retry' ? 'Retrying…' : 'Retry'}
-    </button>
+{:else if session.status === 'failed'}
+  <div class="failure-dock" class:no-speech={session.error?.code === 'no_speech'} role={session.error?.code === 'no_speech' ? 'status' : 'alert'}>
+    <div class="recovery-copy">
+      <p>{captureErrorMessage(session.error, 'Processing could not finish.')}</p>
+      <p class="recovery-help">{recovery.guidance}</p>
+    </div>
+    <div class="recovery-buttons">
+      {#if recovery.settings || !hasApiKey}
+        <button type="button" disabled={pending !== null} onclick={onOpenSettings}>Open settings</button>
+      {/if}
+      {#if recovery.retryLabel}
+        <button type="button" disabled={pending !== null} onclick={retry}>{pending === 'retry' ? 'Retrying…' : recovery.retryLabel}</button>
+      {/if}
+      {#if recovery.newMeeting}
+        <button type="button" disabled={pending !== null} onclick={onNewNote}>New meeting</button>
+      {/if}
+    </div>
   </div>
-{:else if session.status === 'draft' || session.status === 'failed'}
-  <div class="recording-dock draft">
-    {#if session.status === 'failed'}
-      <span class="failed-start-message" role="alert">{session.error?.message ?? 'Recording could not start.'}</span>
-    {/if}
-    <button class="start-meeting" type="button" disabled={pending !== null} onclick={start}>
-      <span aria-hidden="true"></span>
-      {pending === 'start' ? 'Starting…' : 'Start meeting'}
-    </button>
+{:else if session.status === 'draft'}
+  <div class="recording-readiness">
+    <p>Records your Mac’s default microphone and system audio. Connect and select headphones before starting.</p>
+    <div class="recording-dock draft">
+      <button class="start-meeting" type="button" disabled={pending !== null} onclick={start}>
+        <span aria-hidden="true"></span>
+        {pending === 'start' ? 'Starting…' : hasApiKey ? 'Start meeting' : 'Add API key to start'}
+      </button>
+    </div>
   </div>
 {/if}
 
 {#if actionError}
   <p class="dock-error" role="alert">{actionError}</p>
 {/if}
+
+<style>
+  .failure-dock { position: static; transform: none; width: 100%; max-width: 720px; margin: 24px 0; padding: 16px; box-shadow: none; flex-wrap: wrap; align-items: flex-start; }
+  .failure-dock.no-speech { color: var(--ink); border-color: var(--line); background: var(--sidebar); }
+  .no-speech button { color: var(--ink); background: var(--paper); border: 1px solid var(--line); }
+  .no-speech button:last-child { color: white; background: var(--accent-text); border-color: var(--accent-text); }
+  .recovery-copy { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+  .recovery-copy .recovery-help { margin-top: 8px; color: var(--muted-text); font-size: 13px; line-height: 1.5; }
+  .recovery-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .recording-readiness { margin-top: 28px; }
+  .recording-readiness > p { max-width: 62ch; color: var(--muted-text); font-size: 13px; line-height: 1.5; }
+  .recording-readiness .recording-dock { margin-top: 12px; }
+</style>

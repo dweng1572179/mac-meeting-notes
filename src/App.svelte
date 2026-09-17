@@ -3,6 +3,8 @@
   import {
     bootstrap,
     createSession,
+    saveSession,
+    defaultTranscriptionSettings,
     deleteSession,
     deleteTranscript,
     recordingHealth,
@@ -12,13 +14,16 @@
   import MeetingEditor from './lib/MeetingEditor.svelte';
   import SettingsDialog from './lib/SettingsDialog.svelte';
   import Sidebar from './lib/Sidebar.svelte';
-  import type { RecordingHealth, Session } from './lib/types';
+  import { errorMessage } from './lib/recovery';
+  import type { RecordingHealth, Session, TranscriptionSettings } from './lib/types';
   import { captureCoverage } from './lib/RecordingDock.svelte';
 
   let sessions = $state<Session[]>([]);
   let selectedId = $state<string | null>(null);
   let selectedFolder = $state<string | null>(null);
   let hasApiKey = $state(false);
+  let settings = $state<TranscriptionSettings>({ ...defaultTranscriptionSettings });
+  let loadFailed = $state(false);
   let settingsOpen = $state(false);
   let loading = $state(true);
   let creating = $state(false);
@@ -52,33 +57,38 @@
   let recordingBaselines = $state<Record<string, number>>({});
   let selected = $derived(sessions.find((session) => session.id === selectedId) ?? null);
 
+  async function loadLibrary() {
+    loading = true;
+    error = '';
+    try {
+      const data = await bootstrap();
+      sessions = data.sessions;
+      hasApiKey = data.hasApiKey;
+      settings = data.settings ?? { ...defaultTranscriptionSettings };
+      loadFailed = false;
+    } catch (cause) {
+      loadFailed = true;
+      error = errorMessage(cause, 'Meeting Notes could not load your library. Try again.');
+    } finally { loading = false; }
+  }
+
   onMount(() => {
-    bootstrap()
-      .then((data) => {
-        sessions = data.sessions;
-        selectedId = null;
-        hasApiKey = data.hasApiKey;
-      })
-      .catch(() => {
-        error = 'Meeting Notes could not load your library. Quit and reopen the app to try again.';
-      })
-      .finally(() => (loading = false));
-
-    const unlisten = onSessionUpdated(updateSession);
-
-    return () => unlisten();
+    void loadLibrary();
+    return onSessionUpdated(updateSession);
   });
 
   async function newNote() {
+    if (creating) return;
     creating = true;
     error = '';
     try {
       await editor?.flush();
-      const session = await createSession({ title: 'Untitled meeting', context: '', attendees: [] });
+      let session = await createSession({ title: 'Untitled meeting', context: '', attendees: [] });
+      if (selectedFolder) session = await saveSession({ id: session.id, title: session.title, context: '', attendees: [], folder: selectedFolder, originalNotes: '' });
       sessions = [session, ...sessions];
       selectedId = session.id;
-    } catch {
-      error = 'A new note could not be created. Check that Meeting Notes can write to its data folder.';
+    } catch (cause) {
+      error = errorMessage(cause, 'A new note could not be created. Your current note is still open.');
     } finally {
       creating = false;
     }
@@ -107,8 +117,8 @@
     try {
       await editor?.flush();
       selectedId = id;
-    } catch {
-      error = 'Save this note before switching meetings.';
+    } catch (cause) {
+      error = errorMessage(cause, 'Save this note before switching meetings.');
     }
   }
 
@@ -118,8 +128,8 @@
       await editor?.flush();
       selectedId = null;
       selectedFolder = folder;
-    } catch {
-      error = 'Save this note before switching views.';
+    } catch (cause) {
+      error = errorMessage(cause, 'Save this note before switching views.');
     }
   }
 
@@ -162,7 +172,7 @@
           <div role="alert">
             {#if healthError}<p>{healthError}</p>{/if}
             {#each health?.warnings ?? [] as warning}<p>{warning}</p>{/each}
-            <p>Check Microphone and Screen &amp; System Audio Recording permissions if audio is expected. Stop this recording before replacing or updating the app.</p>
+            <p>A quiet source may produce no frames. If speech is expected, check your selected microphone and macOS audio permissions. Stop recording before updating the app.</p>
           </div>
         {/if}
         {#if selectedId !== recordingId}
@@ -171,7 +181,7 @@
       </aside>
     {/if}
     {#if error}
-      <div class="app-error" role="alert">{error}</div>
+      <div class="app-error" role="alert">{error}{#if loadFailed}<button type="button" disabled={loading} onclick={loadLibrary}>Reload library</button>{/if}</div>
     {/if}
 
     {#if loading}
@@ -189,6 +199,7 @@
           onOpenSettings={() => (settingsOpen = true)}
           onDeleteTranscript={removeTranscript}
           onDeleteMeeting={removeMeeting}
+          onNewNote={newNote}
         />
       {/key}
     {:else}
@@ -209,6 +220,8 @@
 {#if settingsOpen}
   <SettingsDialog
     {hasApiKey}
+    {settings}
+    onSettingsSaved={(saved) => (settings = saved)}
     onSaved={() => (hasApiKey = true)}
     onClose={() => (settingsOpen = false)}
   />

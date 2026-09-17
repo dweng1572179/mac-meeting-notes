@@ -4,7 +4,9 @@ use reqwest::{multipart, Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::domain::{AppError, AppResult, MeetingAnswer, MeetingCitation, Session};
+use crate::domain::{
+    AppError, AppResult, MeetingAnswer, MeetingCitation, Session, TranscriptionSettings,
+};
 
 const API_BASE: &str = "https://api.openai.com/v1";
 const ENRICHMENT_MODEL: &str = "gpt-6-astra";
@@ -64,6 +66,49 @@ impl OpenAiClient {
     }
 
     pub async fn transcribe(&self, audio_path: &Path, api_key: &str) -> AppResult<String> {
+        self.transcribe_with_settings(
+            audio_path,
+            api_key,
+            &TranscriptionSettings::default(),
+            String::new(),
+        )
+        .await
+    }
+
+    pub async fn transcribe_session(
+        &self,
+        audio_path: &Path,
+        api_key: &str,
+        session: &Session,
+    ) -> AppResult<String> {
+        session.transcription_settings.validate()?;
+        let attendees: String = session
+            .attendees
+            .iter()
+            .flat_map(|name| name.chars().chain(std::iter::once(' ')))
+            .take(500)
+            .collect();
+        let context: String = session.context.chars().take(1000).collect();
+        let prompt = if session.transcription_settings.vocabulary.is_empty()
+            && attendees.trim().is_empty()
+            && context.trim().is_empty()
+        {
+            String::new()
+        } else {
+            format!("Recognition hints only; transcribe only words actually spoken. Do not add these terms unless heard.\nVocabulary: {}\nAttendees: {}\nContext: {}", session.transcription_settings.vocabulary, attendees, context)
+        };
+        self.transcribe_with_settings(audio_path, api_key, &session.transcription_settings, prompt)
+            .await
+    }
+
+    async fn transcribe_with_settings(
+        &self,
+        audio_path: &Path,
+        api_key: &str,
+        settings: &TranscriptionSettings,
+        prompt: String,
+    ) -> AppResult<String> {
+        settings.validate()?;
         if std::fs::metadata(audio_path)
             .map_err(|_| AppError::new("audio_file", "Unable to read recorded audio"))?
             .len()
@@ -84,8 +129,8 @@ impl OpenAiClient {
             .and_then(|name| name.to_str())
             .unwrap_or("recording.m4a")
             .to_owned();
-        let form = multipart::Form::new()
-            .text("model", "gpt-4o-mini-transcribe")
+        let mut form = multipart::Form::new()
+            .text("model", settings.model.clone())
             .text("response_format", "json")
             .part(
                 "file",
@@ -94,6 +139,12 @@ impl OpenAiClient {
                     .mime_str("audio/mp4")
                     .map_err(openai_request_error)?,
             );
+        if !settings.language.is_empty() {
+            form = form.text("language", settings.language.clone());
+        }
+        if !prompt.is_empty() {
+            form = form.text("prompt", prompt);
+        }
         let response = self
             .client
             .post(format!("{}/audio/transcriptions", self.base_url))
@@ -154,7 +205,7 @@ impl OpenAiClient {
             .post(format!("{}/responses", self.base_url))
             .timeout(Duration::from_secs(300))
             .bearer_auth(api_key)
-            .json(&build_meeting_question_request(sessions, question))
+            .json(&build_meeting_question_request(sessions, question)?)
             .send()
             .await
             .map_err(openai_request_error)?;
@@ -225,24 +276,31 @@ pub fn build_enrichment_request(session: &Session) -> Value {
     })
 }
 
-fn build_meeting_question_request(sessions: &[Session], question: &str) -> Value {
-    let sources = sessions
-        .iter()
-        .map(|session| {
-            format!(
-                "SOURCE ID: {}\nTITLE: {}\nDATE: {}\n{}",
-                session.id,
-                session.title,
-                session.started_at,
-                meeting_source_text(session)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n");
-    json!({
+fn build_meeting_question_request(sessions: &[Session], question: &str) -> AppResult<Value> {
+    let mut sources = String::new();
+    for session in sessions {
+        let source = format!(
+            "SOURCE ID: {}\nTITLE: {}\nDATE: {}\n{}\n\n---\n\n",
+            session.id,
+            session.title,
+            session.started_at,
+            meeting_source_text(session)
+        );
+        // Bound the complete selected context; silently clipping would omit later decisions.
+        if sources.len().saturating_add(source.len()) > 200_000 {
+            let guidance = if sessions.len() == 1 {
+                "This meeting is too large to answer from in full. Use transcript search or export to review its complete content."
+            } else {
+                "These meetings are too large to answer from in full. Choose a smaller folder or ask about one meeting."
+            };
+            return Err(AppError::new("question_sources_too_large", guidance));
+        }
+        sources.push_str(&source);
+    }
+    Ok(json!({
         "model": ENRICHMENT_MODEL,
         "store": false,
-        "instructions": "Answer only from the supplied meeting sources. Be concise and specific. Cite each factual claim with one or more source records. Each citation excerpt must be an exact contiguous quote from that source. Never invent a meeting ID or excerpt. If the sources do not answer the question, say so plainly and return no citations.",
+        "instructions": "Answer only from the supplied meeting sources. Be concise and specific. Cite each factual claim with one or more source records. Each citation excerpt must be an exact contiguous quote from that source. Never invent a meeting ID or excerpt. Respect capture warnings; never imply missing parts were captured. If the sources do not answer the question, say so plainly and return no citations.",
         "input": [{
             "role": "user",
             "content": [{
@@ -277,29 +335,19 @@ fn build_meeting_question_request(sessions: &[Session], question: &str) -> Value
                 }
             }
         }
-    })
+    }))
 }
 
 fn meeting_source_text(session: &Session) -> String {
-    let source = format!(
-        "Context: {}\nOriginal notes: {}\nTranscript: {}\nEnhanced notes: {}",
+    format!(
+        "Attendees: {}\nContext: {}\nOriginal notes: {}\nTranscript: {}\nEnhanced notes: {}\nCapture warnings: {}",
+        session.attendees.join(", "),
         session.context,
         session.original_notes,
         session.transcript.as_deref().unwrap_or_default(),
         session.enriched_notes.as_deref().unwrap_or_default(),
-    );
-    truncate_utf8(&source, 8_000).to_owned()
-}
-
-fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
+        session.warnings.join("\n"),
+    )
 }
 
 fn validate_meeting_answer(
