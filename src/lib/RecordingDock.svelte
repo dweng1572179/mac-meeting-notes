@@ -19,7 +19,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { retryProcessing, startRecording, stopRecording } from './api';
-  import { processingLabel, recoveryActions } from './recovery';
+  import { processingLabel, recordingTranscriptionLabel, recoveryActions } from './recovery';
   import type { RecordingHealth, Session } from './types';
 
   let {
@@ -101,7 +101,7 @@
       recordingStarted = baseline;
       now = baseline;
       onRecordingStarted(recording.sessionId, baseline);
-      onSessionChange({ ...session, status: 'recording', error: null });
+      onSessionChange({ ...session, status: 'recording', segmentedCapture: true, error: null });
     } catch (error) {
       actionError = captureErrorMessage(error);
     } finally {
@@ -142,12 +142,18 @@
   <div class="recording-dock live" aria-label="Meeting recording in progress">
     <span class="sr-only" role="status">Recording started.</span>
     <span class="recording-dot" aria-hidden="true"></span>
-    <span>{health?.warnings.length ? 'Check audio capture' : 'Recording'}</span>
+    <div class="live-copy">
+      <span>{health?.warnings.length ? 'Check audio capture' : 'Recording'}</span>
+      {#if session.segmentedCapture}<small>{recordingTranscriptionLabel(session)}</small>{/if}
+    </div>
     <time aria-label={`Elapsed recording time ${elapsedLabel()}`}>{elapsedLabel()}</time>
     <button type="button" disabled={pending !== null} onclick={stop}>
       {pending === 'stop' ? 'Stopping…' : 'Stop'}
     </button>
   </div>
+  {#if session.liveTranscriptionError}
+    <p class="live-transcription-warning" role="status">Recording continues. {session.liveTranscriptionError.message} Audio is saved for retry after you stop.</p>
+  {/if}
 {:else if session.status === 'processing'}
   <div class="recording-dock processing" role="status" aria-live="polite">
     <span class="processing-dot" aria-hidden="true"></span>
@@ -174,7 +180,7 @@
   </div>
 {:else if session.status === 'draft'}
   <div class="recording-readiness">
-    <p>Records your Mac’s default microphone and system audio. Connect and select headphones before starting.</p>
+    <p>Captures your microphone and Mac audio, and transcribes during the meeting. Connect your headphones before starting.</p>
     <div class="recording-dock draft">
       <button class="start-meeting" type="button" disabled={pending !== null} onclick={start}>
         <span aria-hidden="true"></span>
@@ -189,6 +195,9 @@
 {/if}
 
 <style>
+  .live-copy { display: grid; gap: 3px; }
+  .live-copy small { color: #d4d2c9; font-size: 11px; font-weight: 400; }
+  .live-transcription-warning { max-width: 720px; padding: 12px 0; color: var(--muted-text); font-size: 13px; line-height: 1.5; }
   .failure-dock { position: static; transform: none; width: 100%; max-width: 720px; margin: 24px 0; padding: 16px; box-shadow: none; flex-wrap: wrap; align-items: flex-start; }
   .failure-dock.no-speech { color: var(--ink); border-color: var(--line); background: var(--sidebar); }
   .no-speech button { color: var(--ink); background: var(--paper); border: 1px solid var(--line); }

@@ -138,13 +138,15 @@ fn enrichment_request_preserves_dynamic_session_content_at_input_path() {
     assert!(input.contains("CONTEXT_TOKEN_814"));
     assert!(input.contains("NOTES_TOKEN_299"));
     assert!(input.contains("Later explicit decision: pause for TRANSCRIPT_TOKEN_552."));
-    assert_eq!(request["model"], "gpt-6-astra");
+    assert_eq!(request["model"], "gpt-4.1-mini-2025-04-14");
     assert_eq!(request["store"], false);
 }
 
 #[test]
 fn markdown_omits_empty_sections_and_includes_decisions() {
     let markdown = sections_to_markdown(EnrichedSections {
+        suggestions: Default::default(),
+        omitted_suggestions: false,
         summary: Vec::new(),
         key_points: Vec::new(),
         decisions: vec!["Pause until the rent roll is verified.".into()],
@@ -181,7 +183,7 @@ fn enrich_posts_request_and_parses_completed_output_text() {
 
     assert_eq!(request.request_line, "POST /v1/responses HTTP/1.1");
     assert!(request.headers.contains("authorization: bearer test-key"));
-    assert_eq!(payload["model"], "gpt-6-astra");
+    assert_eq!(payload["model"], "gpt-4.1-mini-2025-04-14");
     assert_eq!(payload["store"], false);
     assert!(payload["input"][0]["content"][0]["text"]
         .as_str()
@@ -298,7 +300,7 @@ fn folder_question_posts_sources_and_rejects_invented_citations() {
     let payload: Value = serde_json::from_str(&request.body).unwrap();
     let input = payload["input"][0]["content"][0]["text"].as_str().unwrap();
 
-    assert_eq!(payload["model"], "gpt-6-astra");
+    assert_eq!(payload["model"], "gpt-4.1-mini-2025-04-14");
     assert_eq!(payload["store"], false);
     assert!(input.contains("first-meeting"));
     assert!(input.contains("SECOND_SOURCE_TOKEN_916"));
@@ -306,6 +308,34 @@ fn folder_question_posts_sources_and_rejects_invented_citations() {
     assert_eq!(answer.citations.len(), 1);
     assert_eq!(answer.citations[0].session_id, "first-meeting");
     assert_eq!(answer.citations[0].title, "Harbor review");
+}
+
+#[test]
+fn meeting_questions_use_saved_ai_edits_instead_of_the_old_baseline() {
+    let mut source = session();
+    source.enriched_notes = Some("OLD_BASELINE_SHOULD_NOT_APPEAR".into());
+    source.edited_enriched_notes = Some("My correction: the decision is Wednesday.".into());
+    let response = json_response(
+        200,
+        &json!({"status":"completed","output":[{"content":[{
+            "type":"output_text", "text":json!({"answer":"Wednesday.","citations":[{
+                "session_id":source.id,"excerpt":"My correction: the decision is Wednesday."
+            }]}).to_string()
+        }]}]})
+        .to_string(),
+    );
+    let (url, requests) = local_server(response);
+    let answer = tauri::async_runtime::block_on(OpenAiClient::with_base_url(url).ask_meetings(
+        &[source],
+        "When?",
+        "test-key",
+    ));
+    let request = requests.recv().unwrap();
+    assert!(request
+        .body
+        .contains("My correction: the decision is Wednesday."));
+    assert!(!request.body.contains("OLD_BASELINE_SHOULD_NOT_APPEAR"));
+    assert_eq!(answer.unwrap().citations.len(), 1);
 }
 
 #[test]
@@ -529,4 +559,146 @@ fn meeting_question_rejects_oversized_sources_before_network() {
     )
     .unwrap_err();
     assert_eq!(error.code, "question_sources_too_large");
+}
+
+#[test]
+fn diarization_posts_supported_fields_and_preserves_timed_speakers() {
+    let path = std::env::temp_dir().join(format!("diarize-{}.m4a", uuid::Uuid::new_v4()));
+    std::fs::write(&path, [0, 0, 0, 9, b'm', b'd', b'a', b't', 1]).unwrap();
+    let mut source = session();
+    source.transcription_settings.model = "gpt-4o-transcribe-diarize".into();
+    source.transcription_settings.language = "en".into();
+    source.transcription_settings.vocabulary = "must not send".into();
+    let (url, requests) = local_server(json_response(200, &json!({"text":"I'm Maya.","duration":3.0,"segments":[{"id":"seg0","speaker":"A","start":0.2,"end":2.9,"text":"I'm Maya."}]}).to_string()));
+    let result = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url(url).transcribe_session(&path, "test-key", &source),
+    );
+    std::fs::remove_file(path).unwrap();
+    assert!(result.is_ok(), "diarization must be supported: {result:?}");
+    let result = result.unwrap();
+    assert_eq!(result.text, "I'm Maya.");
+    assert_eq!(result.segments[0].speaker, "A");
+    assert_eq!(result.segments[0].start_seconds, 0.2);
+    let body = requests.recv().unwrap().body;
+    assert!(body.contains("diarized_json"));
+    assert!(body.contains("name=\"chunking_strategy\"\r\n\r\nauto"));
+    assert!(!body.contains("name=\"prompt\""));
+    assert!(body.contains("name=\"language\"\r\n\r\nen"));
+}
+
+#[test]
+fn enrichment_rejects_invented_suggestion_evidence() {
+    for evidence in [
+        json!({"sourceId":"invented","excerpt":"rent roll"}),
+        json!({"sourceId":"manual-notes","excerpt":"Invented quote"}),
+    ] {
+        let response = json_response(200, &json!({"status":"completed","output":[{"content":[{"type":"output_text","text":json!({
+            "summary":[],"key_points":[],"decisions":[],"action_items":[],
+            "suggestions":{"title":{"value":"Rent roll review","evidence":[evidence]},"context":null,"category":null,"participants":[],"topics":[]}
+        }).to_string()}]}]}).to_string());
+        let (url, _) = local_server(response);
+        let result = tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url(url).enrich(&session(), "test-key"),
+        );
+        let sections = result.expect("Unsupported metadata must not fail usable notes");
+        assert!(
+            sections.suggestions.title.is_none(),
+            "invented evidence must not be accepted"
+        );
+        assert!(sections.omitted_suggestions);
+    }
+}
+
+#[test]
+fn diarization_rejects_invalid_turns_without_consuming_source_audio() {
+    let path = std::env::temp_dir().join(format!("diarize-invalid-{}.m4a", uuid::Uuid::new_v4()));
+    std::fs::write(&path, [0, 0, 0, 9, b'm', b'd', b'a', b't', 1]).unwrap();
+    let mut source = session();
+    source.transcription_settings.model = "gpt-4o-transcribe-diarize".into();
+    for segments in [
+        json!([]),
+        json!([{"id":"s0","speaker":"A","start":-1.0,"end":2.0,"text":"Words"}]),
+        json!([{"id":"s0","speaker":"","start":0.0,"end":2.0,"text":"Words"}]),
+        json!([{"id":"s0","speaker":"A","start":0.0,"end":5.1,"text":"Words"}]),
+        json!([{"id":"s0","speaker":"A","start":0.0,"end":2.0,"text":"Words"},{"id":"s0","speaker":"B","start":2.0,"end":3.0,"text":"Words"}]),
+    ] {
+        let (url, _) = local_server(json_response(
+            200,
+            &json!({"text":"Words","duration":4.0,"segments":segments}).to_string(),
+        ));
+        let result = tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url(url).transcribe_session(&path, "test-key", &source),
+        );
+        assert_eq!(result.unwrap_err().code, "invalid_transcription");
+        assert!(path.exists());
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn enrichment_validates_grounded_speaker_suggestions_and_topic_anchors() {
+    let mut source = session();
+    source.transcription = serde_json::from_value(json!([{"source":"system","chunks":[{"startSeconds":0.0,"durationSeconds":4.0,"transcript":"I'm Maya. We agreed Monday.","segments":[{"id":"s0","speaker":"A","startSeconds":0.0,"endSeconds":3.0,"text":"I'm Maya. We agreed Monday."}]}]}])).unwrap();
+    let suggestions = json!({
+        "title":{"value":"Monday release","evidence":[{"sourceId":"system:offset-0:s0","excerpt":"We agreed Monday."}]},
+        "context":null,"category":null,
+        "participants":[{"name":"Maya","speakerKey":"system:offset-0:A","evidence":[{"sourceId":"system:offset-0:s0","excerpt":"I'm Maya."}]}],
+        "topics":[{"title":"Release date","startsAtTurnId":"system:offset-0:s0","evidence":[{"sourceId":"system:offset-0:s0","excerpt":"We agreed Monday."}]}]
+    });
+    for mutation in [
+        "valid",
+        "speaker",
+        "anchor",
+        "duplicate_anchor",
+        "missing_evidence",
+        "invented_participant",
+    ] {
+        let mut candidate = suggestions.clone();
+        match mutation {
+            "speaker" => {
+                candidate["participants"][0]["speakerKey"] = json!("system:offset-60000:A")
+            }
+            "anchor" => candidate["topics"][0]["startsAtTurnId"] = json!("missing"),
+            "duplicate_anchor" => {
+                let topic = candidate["topics"][0].clone();
+                candidate["topics"].as_array_mut().unwrap().push(topic);
+            }
+            "missing_evidence" => candidate["title"]["evidence"] = json!([]),
+            "invented_participant" => {
+                candidate["participants"][0]["name"] = json!("Invented Person")
+            }
+            _ => {}
+        }
+        let response = json_response(200,&json!({"status":"completed","output":[{"content":[{"type":"output_text","text":json!({"summary":["Release Monday."],"key_points":[],"decisions":[],"action_items":[],"suggestions":candidate}).to_string()}]}]}).to_string());
+        let (url, requests) = local_server(response);
+        let result = tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url(url).enrich(&source, "test-key"),
+        );
+        if mutation == "valid" {
+            assert_eq!(result.unwrap().suggestions.participants[0].name, "Maya");
+            let body: Value = serde_json::from_str(&requests.recv().unwrap().body).unwrap();
+            assert!(body["text"]["format"]["schema"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("suggestions")));
+            assert!(body["input"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("system:offset-0:A"));
+        } else {
+            let sections = result.expect("Keep notes and omit unsupported suggestions");
+            assert_eq!(sections.summary, vec!["Release Monday."]);
+            assert!(sections.omitted_suggestions, "{mutation}");
+            meeting_notes_lib::openai::validate_suggestions(&sections.suggestions, &source)
+                .unwrap();
+            if mutation == "invented_participant" || mutation == "speaker" {
+                assert!(sections.suggestions.participants.is_empty());
+                assert!(sections.suggestions.title.is_some());
+            }
+        }
+    }
+    assert_eq!(
+        source.original_notes,
+        "rent roll is the issue NOTES_TOKEN_299"
+    );
 }

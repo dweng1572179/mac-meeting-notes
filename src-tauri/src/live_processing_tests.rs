@@ -1,0 +1,531 @@
+use super::*;
+use crate::commands::live::{
+    reconcile_segments, register_segments, transcribe_available, ProcessingLease,
+};
+use crate::recorder::CapturedSegment;
+
+#[test]
+fn older_section_registered_during_upload_does_not_move_newer_checkpoint() {
+    let fixture = Fixture::new();
+    let input = fixture.source(false, 1, false);
+    let info = crate::audio::inspect(&input).unwrap();
+    let duration = info.frames as f64 / info.sample_rate;
+    let store = SessionStore::new(fixture.root.clone());
+    let older_path = store
+        .segment_path(&fixture.id, AudioSource::System, 0)
+        .unwrap();
+    let newer_path = store
+        .segment_path(&fixture.id, AudioSource::System, 1)
+        .unwrap();
+    fs::copy(&input, &older_path).unwrap();
+    fs::rename(input, &newer_path).unwrap();
+    let callback_root = fixture.root.clone();
+    let callback_id = fixture.id.clone();
+    let older = CapturedSegment {
+        source: AudioSource::System,
+        index: 0,
+        start_seconds: 0.0,
+        duration_seconds: duration,
+        path: older_path.clone(),
+    };
+    let (url, server) = server(
+        vec![
+            text_response("[SIMULATION] Newer section checkpoint."),
+            response(
+                503,
+                json!({"error":{"message":"temporary failure","type":"server_error"}}),
+            ),
+        ],
+        move |index| {
+            if index == 0 {
+                // The response is held until this registration sorts an older chunk ahead of
+                // the in-flight upload. Saving by the old vector index corrupts the checkpoint.
+                let state = AppState::new(SessionStore::new(callback_root.clone()));
+                register_segments(&state, &callback_id, std::slice::from_ref(&older)).unwrap();
+            }
+        },
+    );
+    let state = fixture.state(&url);
+    let mut session = store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Recording;
+    session.segmented_capture = true;
+    session.audio_path = None;
+    store.save(&session).unwrap();
+    register_segments(
+        &state,
+        &fixture.id,
+        &[CapturedSegment {
+            source: AudioSource::System,
+            index: 1,
+            start_seconds: duration,
+            duration_seconds: duration,
+            path: newer_path.clone(),
+        }],
+    )
+    .unwrap();
+    let progress = std::sync::Mutex::new(Vec::new());
+    let result = tauri::async_runtime::block_on(transcribe_available(
+        &state,
+        &fixture.id,
+        "test-only",
+        &|saved| progress.lock().unwrap().push(saved),
+    ));
+    assert!(
+        result.is_err(),
+        "the older section's injected API failure must propagate"
+    );
+    assert_eq!(server.join().unwrap().len(), 2);
+    let saved = store.get(&fixture.id).unwrap();
+    assert_eq!(saved.status, SessionStatus::Recording);
+    assert_eq!(saved.original_notes, session.original_notes);
+    assert!(saved.enriched_notes.is_none());
+    let chunks = &saved.transcription[0].chunks;
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0].segment_index, Some(0));
+    assert_eq!(chunks[0].transcript, None);
+    assert_eq!(chunks[1].segment_index, Some(1));
+    assert_eq!(
+        chunks[1].transcript.as_deref(),
+        Some("[SIMULATION] Newer section checkpoint.")
+    );
+    assert!(
+        older_path.exists(),
+        "failed section audio must remain retryable"
+    );
+    assert!(
+        !newer_path.exists(),
+        "only the correctly checkpointed section can be deleted"
+    );
+    assert_eq!(progress.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn stopped_capture_recovers_unregistered_final_tail_once_and_keeps_audio() {
+    let fixture = Fixture::new();
+    let input = fixture.source(false, 1, false);
+    let info = crate::audio::inspect(&input).unwrap();
+    let duration = info.frames as f64 / info.sample_rate;
+    let state = fixture.state("http://127.0.0.1:1/v1");
+    let path = state
+        .store
+        .segment_path(&fixture.id, AudioSource::System, 1)
+        .unwrap();
+    fs::rename(input, &path).unwrap();
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.segmented_capture = true;
+    session.audio_path = None;
+    session.capture_segments = vec![crate::domain::CaptureSegment {
+        source: AudioSource::System,
+        index: 0,
+        start_seconds: 0.0,
+        duration_seconds: 60.0,
+    }];
+    session.transcription = vec![SourceTranscript {
+        source: AudioSource::System,
+        chunks: vec![TranscriptChunk {
+            start_seconds: 0.0,
+            duration_seconds: 60.0,
+            transcript: Some("[SIMULATION] Existing checkpoint.".into()),
+            segment_index: Some(0),
+            segments: vec![],
+        }],
+    }];
+    state.store.save(&session).unwrap();
+    let recovered = reconcile_segments(&state, &fixture.id).unwrap();
+    assert_eq!(recovered.capture_segments.len(), 2);
+    assert_eq!(recovered.capture_segments[1].start_seconds, 60.0);
+    assert!((recovered.capture_segments[1].duration_seconds - duration).abs() < 0.001);
+    assert_eq!(
+        recovered.transcription[0].chunks[0].transcript,
+        session.transcription[0].chunks[0].transcript
+    );
+    assert_eq!(recovered.transcription[0].chunks[1].transcript, None);
+    assert_eq!(state.store.get(&fixture.id).unwrap(), recovered);
+    assert_eq!(reconcile_segments(&state, &fixture.id).unwrap(), recovered);
+    assert!(
+        path.exists(),
+        "untranscribed final tail must remain on disk"
+    );
+}
+
+#[test]
+fn processing_lease_is_exclusive_per_meeting_and_released_on_drop() {
+    let fixture = Fixture::new();
+    let state = fixture.state("http://127.0.0.1:1/v1");
+    let lease = ProcessingLease::claim(&state, &fixture.id)
+        .unwrap()
+        .unwrap();
+    assert!(ProcessingLease::claim(&state, &fixture.id)
+        .unwrap()
+        .is_none());
+    let other = ProcessingLease::claim(&state, "different-meeting")
+        .unwrap()
+        .unwrap();
+    drop(other);
+    assert!(ProcessingLease::claim(&state, &fixture.id)
+        .unwrap()
+        .is_none());
+    drop(lease);
+    let next = ProcessingLease::claim(&state, &fixture.id)
+        .unwrap()
+        .unwrap();
+    drop(next);
+    assert!(state.processing_jobs.lock().unwrap().is_empty());
+}
+
+#[test]
+fn failed_start_with_numbered_audio_is_durable_and_retryable() {
+    let fixture = Fixture::new();
+    let input = fixture.source(false, 1, false);
+    let state = fixture.state("http://127.0.0.1:1/v1");
+    let tail = state
+        .store
+        .segment_path(&fixture.id, AudioSource::System, 0)
+        .unwrap();
+    fs::rename(&input, &tail).unwrap();
+    let microphone = fixture
+        .root
+        .join("audio")
+        .join(format!("{}-mic.m4a", fixture.id));
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Draft;
+    session.segmented_capture = true;
+    session.audio_path = None;
+    state.store.save(&session).unwrap();
+    let error = start_recording_state(&state, &fixture.id, input, microphone, |_, _, _| {
+        Err(AppError::new("capture_start", "Injected startup failure"))
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "capture_start");
+    let failed = state.store.get(&fixture.id).unwrap();
+    assert_eq!(failed.status, SessionStatus::Failed);
+    assert_eq!(failed.error.unwrap().code, "capture_start");
+    assert!(failed.ended_at.is_some());
+    assert!(tail.exists());
+    let recovered = reconcile_segments(&state, &fixture.id).unwrap();
+    assert_eq!(recovered.transcription[0].chunks[0].segment_index, Some(0));
+    assert_eq!(recovered.transcription[0].chunks[0].transcript, None);
+}
+
+#[test]
+fn corrupt_final_tail_does_not_prevent_checkpointing_healthy_section() {
+    let fixture = Fixture::new();
+    let input = fixture.source(false, 1, false);
+    let (url, server) = server(
+        vec![text_response("[SIMULATION] Healthy section retained.")],
+        |_| {},
+    );
+    let state = fixture.state(&url);
+    let good = state
+        .store
+        .segment_path(&fixture.id, AudioSource::System, 0)
+        .unwrap();
+    let corrupt = state
+        .store
+        .segment_path(&fixture.id, AudioSource::System, 1)
+        .unwrap();
+    fs::rename(input, &good).unwrap();
+    fs::write(&corrupt, b"unfinished final container").unwrap();
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.segmented_capture = true;
+    session.audio_path = None;
+    state.store.save(&session).unwrap();
+    let result = tauri::async_runtime::block_on(process_session_with_key(
+        &state,
+        &fixture.id,
+        "test-only",
+        |_| {},
+    ));
+    assert_eq!(result.unwrap_err().code, "audio_chunk");
+    assert_eq!(server.join().unwrap().len(), 1);
+    let saved = state.store.get(&fixture.id).unwrap();
+    assert_eq!(
+        saved.transcription[0].chunks[0].transcript.as_deref(),
+        Some("[SIMULATION] Healthy section retained.")
+    );
+    assert!(saved.enriched_notes.is_none());
+    assert!(corrupt.exists());
+    assert!(!good.exists());
+    assert_eq!(saved.original_notes, session.original_notes);
+}
+
+#[test]
+fn corrupt_registered_section_does_not_block_healthy_other_source() {
+    let fixture = Fixture::new();
+    let input = fixture.source(true, 1, false);
+    let info = crate::audio::inspect(&input).unwrap();
+    let duration = info.frames as f64 / info.sample_rate;
+    let (url, server) = server(
+        vec![text_response("[SIMULATION] Healthy microphone checkpoint.")],
+        |_| {},
+    );
+    let state = fixture.state(&url);
+    let corrupt = state
+        .store
+        .segment_path(&fixture.id, AudioSource::System, 0)
+        .unwrap();
+    let good = state
+        .store
+        .segment_path(&fixture.id, AudioSource::Microphone, 0)
+        .unwrap();
+    fs::write(&corrupt, b"registered but unreadable audio").unwrap();
+    fs::rename(input, &good).unwrap();
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.segmented_capture = true;
+    session.microphone_audio_path = None;
+    state.store.save(&session).unwrap();
+    register_segments(
+        &state,
+        &fixture.id,
+        &[
+            CapturedSegment {
+                source: AudioSource::System,
+                index: 0,
+                start_seconds: 0.0,
+                duration_seconds: duration,
+                path: corrupt.clone(),
+            },
+            CapturedSegment {
+                source: AudioSource::Microphone,
+                index: 0,
+                start_seconds: 0.1,
+                duration_seconds: duration,
+                path: good.clone(),
+            },
+        ],
+    )
+    .unwrap();
+    let result = tauri::async_runtime::block_on(transcribe_available(
+        &state,
+        &fixture.id,
+        "test-only",
+        &|_| {},
+    ));
+    assert!(result.is_err());
+    let saved = state.store.get(&fixture.id).unwrap();
+    let healthy = saved
+        .transcription
+        .iter()
+        .find(|track| track.source == AudioSource::Microphone)
+        .unwrap();
+    assert_eq!(
+        healthy.chunks[0].transcript.as_deref(),
+        Some("[SIMULATION] Healthy microphone checkpoint.")
+    );
+    assert_eq!(server.join().unwrap().len(), 1);
+    assert!(corrupt.exists());
+    assert!(!good.exists());
+    assert_eq!(saved.original_notes, session.original_notes);
+}
+
+#[test]
+#[ignore = "Uses paid OpenAI diarization/enrichment and authorized login Keychain access"]
+fn live_synthetic_segmented_diarization_with_openai() {
+    let fixture = Fixture::new();
+    let script = fixture.root.join("speaker-script.txt");
+    let speech = format!("This is a simulated Cedar project meeting. My name is Maya. We initially proposed a Friday release. {} Final decision: release on Monday. Maya will complete verification before the Monday release. This final decision replaces the initial Friday proposal.", "We are reviewing the meeting notes application. Reliable audio capture and saved transcripts are the priorities. This synthetic test contains no customer information. The team will verify that the final decision remains visible after the meeting ends. ".repeat(8));
+    fs::write(&script, speech).unwrap();
+    let aiff = fixture.root.join("speaker.aiff");
+    assert!(std::process::Command::new("/usr/bin/say")
+        .args(["-v", "Samantha", "-r", "190", "-f"])
+        .arg(&script)
+        .arg("-o")
+        .arg(&aiff)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let audio = fixture.root.join("synthetic-full.m4a");
+    assert!(std::process::Command::new("/usr/bin/afconvert")
+        .args(["-f", "m4af", "-d", "aac", "-b", "32000"])
+        .arg(&aiff)
+        .arg(&audio)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let info = crate::audio::inspect(&audio).unwrap();
+    let duration = info.frames as f64 / info.sample_rate;
+    assert!(
+        duration > 60.0,
+        "Synthetic speech must cross a section boundary"
+    );
+    let mut state = fixture.state("https://api.openai.com/v1");
+    state.openai = OpenAiClient::new();
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Recording;
+    session.segmented_capture = true;
+    session.transcription_settings = crate::domain::TranscriptionSettings::new_recording_default();
+    session.transcription_settings.language = "en".into();
+    session.original_notes =
+        "[SIMULATION] Prioritize the final release decision and verification owner.".into();
+    state.store.save(&session).unwrap();
+    let mut sections = Vec::new();
+    let mut start = 0.0;
+    while start < duration - 0.000_001 {
+        let index = sections.len() as u64;
+        let length = (duration - start).min(60.0);
+        let path = state
+            .store
+            .segment_path(&fixture.id, AudioSource::System, index)
+            .unwrap();
+        crate::audio::write_chunk(&audio, &path, start, length).unwrap();
+        sections.push(CapturedSegment {
+            source: AudioSource::System,
+            index,
+            start_seconds: start,
+            duration_seconds: length,
+            path,
+        });
+        start += length;
+    }
+    // Use the same authorized system client as the existing paid acceptance test;
+    // the disposable test binary should not request a new persistent Keychain grant.
+    let credential = std::process::Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "com.dweng.meetingnotes",
+            "-a",
+            "openai-api-key",
+            "-w",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        credential.status.success(),
+        "Login Keychain requires manual access approval"
+    );
+    let key = String::from_utf8(credential.stdout).expect("Keychain key is UTF-8");
+    let key = key.trim();
+    register_segments(&state, &fixture.id, &sections[..1]).unwrap();
+    let live =
+        tauri::async_runtime::block_on(process_session_with_key(&state, &fixture.id, key, |_| {}))
+            .unwrap();
+    assert_eq!(live.status, SessionStatus::Recording);
+    assert!(live.enriched_notes.is_none());
+    assert!(!live.transcription[0].chunks[0].segments.is_empty());
+    assert!(!sections[0].path.exists());
+    register_segments(&state, &fixture.id, &sections[1..]).unwrap();
+    update_processing(&state, &fixture.id, |session| {
+        session.status = SessionStatus::Processing;
+    })
+    .unwrap();
+    let complete =
+        tauri::async_runtime::block_on(process_session_with_key(&state, &fixture.id, key, |_| {}))
+            .unwrap();
+    assert_eq!(complete.status, SessionStatus::Complete);
+    assert!(complete
+        .transcript
+        .as_ref()
+        .unwrap()
+        .to_lowercase()
+        .contains("monday"));
+    assert!(complete
+        .enriched_notes
+        .as_ref()
+        .unwrap()
+        .to_lowercase()
+        .contains("monday"));
+    assert!(complete.ai_suggestions.as_ref().unwrap().title.is_some());
+    assert!(complete.transcription[0]
+        .chunks
+        .iter()
+        .all(|chunk| chunk.transcript.is_some() && !chunk.segments.is_empty()));
+    assert_eq!(complete.original_notes, session.original_notes);
+    assert_eq!(state.store.get(&fixture.id).unwrap(), complete);
+    assert!(sections.iter().all(|section| !section.path.exists()));
+    println!("Live segmented acceptance passed: {:.1} seconds, {} sections, {} speaker turns; live checkpoint, final decision, suggestions, durable notes, and section cleanup verified.", duration, sections.len(), crate::domain::transcript_turns(&complete).len());
+}
+
+#[test]
+fn held_processing_lease_blocks_retry_and_destructive_actions_on_failed_session() {
+    let fixture = Fixture::new();
+    let state = fixture.state("http://127.0.0.1:1/v1");
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Failed;
+    session.transcript = Some("[SIMULATION] Retained transcript".into());
+    state.store.save(&session).unwrap();
+    let _lease = ProcessingLease::claim(&state, &fixture.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        prepare_retry(&state, &fixture.id).unwrap_err().code,
+        "invalid_session_status"
+    );
+    assert_eq!(
+        delete_transcript_state(&state, &fixture.id)
+            .unwrap_err()
+            .code,
+        "invalid_session_status"
+    );
+    assert_eq!(
+        delete_session_state(&state, &fixture.id).unwrap_err().code,
+        "invalid_session_status"
+    );
+    assert_eq!(state.store.get(&fixture.id).unwrap(), session);
+}
+
+#[test]
+fn segmented_silent_microphone_adds_warning_without_losing_system_notes() {
+    let fixture = Fixture::new();
+    let system = fixture.source(false, 1, false);
+    let microphone = fixture.source(true, 1, true);
+    let (url, server) = server(
+        vec![
+            text_response("[SIMULATION] System speech retained."),
+            text_response(""),
+            enrichment(),
+        ],
+        |_| {},
+    );
+    let state = fixture.state(&url);
+    let mut sections = Vec::new();
+    for (source, input) in [
+        (AudioSource::System, system),
+        (AudioSource::Microphone, microphone),
+    ] {
+        let info = crate::audio::inspect(&input).unwrap();
+        let path = state.store.segment_path(&fixture.id, source, 0).unwrap();
+        fs::rename(input, &path).unwrap();
+        sections.push(CapturedSegment {
+            source,
+            index: 0,
+            start_seconds: 0.0,
+            duration_seconds: info.frames as f64 / info.sample_rate,
+            path,
+        });
+    }
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.segmented_capture = true;
+    session.audio_path = None;
+    session.microphone_audio_path = None;
+    state.store.save(&session).unwrap();
+    register_segments(&state, &fixture.id, &sections).unwrap();
+    let complete = tauri::async_runtime::block_on(process_session_with_key(
+        &state,
+        &fixture.id,
+        "test-only",
+        |_| {},
+    ))
+    .unwrap();
+    assert_eq!(server.join().unwrap().len(), 3);
+    assert_eq!(complete.status, SessionStatus::Complete);
+    assert!(complete
+        .transcript
+        .as_deref()
+        .unwrap()
+        .contains("System speech retained"));
+    assert!(complete.enriched_notes.is_some());
+    assert_eq!(complete.original_notes, session.original_notes);
+    assert!(
+        complete
+            .warnings
+            .iter()
+            .any(|warning| warning.to_lowercase().contains("microphone")
+                && warning.contains("no transcribed speech")),
+        "Missing microphone coverage warning: {:?}",
+        complete.warnings
+    );
+    assert_eq!(state.store.get(&fixture.id).unwrap(), complete);
+}

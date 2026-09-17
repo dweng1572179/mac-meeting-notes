@@ -1,6 +1,103 @@
 use meeting_notes_lib::domain::{CreateSessionInput, Session, UpdateSessionInput};
 use meeting_notes_lib::store::SessionStore;
 
+#[test]
+fn new_recording_defaults_do_not_change_legacy_session_recognition() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    assert_eq!(store.settings().unwrap().model, "gpt-4o-transcribe-diarize");
+    let legacy = Session::new(CreateSessionInput {
+        title: "Legacy".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    assert_eq!(
+        legacy.transcription_settings.model,
+        "gpt-4o-mini-transcribe"
+    );
+}
+
+#[test]
+fn invalid_capture_manifest_cannot_drive_file_cleanup() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let session = Session::new(CreateSessionInput {
+        title: "Test".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    store.save(&session).unwrap();
+    let path = root.join("sessions").join(format!("{}.json", session.id));
+    let mut saved = serde_json::to_value(&session).unwrap();
+    saved["segmentedCapture"] = serde_json::json!(true);
+    saved["captureSegments"] = serde_json::json!([
+        {"source":"system","index":0,"startSeconds":0.0,"durationSeconds":60.0},
+        {"source":"system","index":0,"startSeconds":60.0,"durationSeconds":60.0}
+    ]);
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let result = store.get(&session.id);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(result.is_err(), "duplicate section identity was accepted");
+}
+
+#[test]
+fn incomplete_section_manifest_cannot_authorize_audio_cleanup() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Test".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    session.segmented_capture = true;
+    session.capture_segments = vec![meeting_notes_lib::domain::CaptureSegment {
+        source: meeting_notes_lib::domain::AudioSource::System,
+        index: 0,
+        start_seconds: 0.0,
+        duration_seconds: 60.0,
+    }];
+    session.transcription = vec![meeting_notes_lib::domain::SourceTranscript {
+        source: meeting_notes_lib::domain::AudioSource::System,
+        chunks: vec![meeting_notes_lib::domain::TranscriptChunk {
+            segment_index: Some(0),
+            start_seconds: 0.0,
+            duration_seconds: 30.0,
+            transcript: Some("Only half the audio".into()),
+            segments: vec![],
+        }],
+    }];
+    let result = store.save(&session);
+    let _ = std::fs::remove_dir_all(root);
+    assert!(
+        result.is_err(),
+        "half a captured section must not count as a complete checkpoint"
+    );
+}
+
+#[test]
+fn deletion_removes_only_exact_numbered_sections_for_its_meeting() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let session = Session::new(CreateSessionInput {
+        title: "Test".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    store.save(&session).unwrap();
+    let dir = root.join("audio");
+    std::fs::create_dir_all(&dir).unwrap();
+    let owned = dir.join(format!("{}-system-segment-00000000.m4a", session.id));
+    let unrelated = dir.join(format!("{}-system-segment-other.m4a", session.id));
+    std::fs::write(&owned, "disposable section").unwrap();
+    std::fs::write(&unrelated, "unrelated").unwrap();
+    store.delete(&session.id).unwrap();
+    let removed = !owned.exists();
+    let preserved = unrelated.exists();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(removed, "numbered section was orphaned after deletion");
+    assert!(preserved, "noncanonical file was deleted");
+}
+
 #[cfg(unix)]
 fn symlinked_session_destination(destination: &str) {
     use std::{fs, os::unix::fs::symlink};
@@ -483,6 +580,8 @@ fn malformed_chunk_progress_is_rejected_before_it_can_drive_cleanup_or_retry() {
         let track = SourceTranscript {
             source: AudioSource::System,
             chunks: vec![TranscriptChunk {
+                segment_index: None,
+                segments: Vec::new(),
                 start_seconds: start,
                 duration_seconds: duration,
                 transcript: Some("saved".into()),
@@ -511,7 +610,10 @@ fn product_settings_roundtrip_validation_and_old_session_default() {
     use meeting_notes_lib::domain::TranscriptionSettings;
     let root = std::env::temp_dir().join(format!("settings-{}", uuid::Uuid::new_v4()));
     let store = SessionStore::new(root.clone());
-    assert_eq!(store.settings().unwrap(), TranscriptionSettings::default());
+    assert_eq!(
+        store.settings().unwrap(),
+        TranscriptionSettings::new_recording_default()
+    );
     let settings = TranscriptionSettings {
         language: "en".into(),
         vocabulary: "界".repeat(2000),

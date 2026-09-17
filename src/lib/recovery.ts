@@ -24,9 +24,9 @@ export function recoveryActions(session: Session) {
     guidance: noSpeech
       ? 'Silence is a valid recording outcome. If speech was expected, check the microphone and audio source. A new meeting starts a fresh recording; retry only reprocesses saved audio.'
       : text && !pending
-        ? 'Your transcript and original notes are saved. Retry continues with enhanced notes.'
-        : retryable ? 'Your original notes and saved progress are kept. Retry resumes unfinished work.'
-        : 'Your original notes are kept. Create a new meeting to record again.'
+        ? 'Your transcript and typed notes are saved. Retry continues with AI notes.'
+        : retryable ? 'Your typed notes and saved progress are kept. Retry resumes unfinished work.'
+        : 'Your typed notes are kept. Create a new meeting to record again.'
   };
 }
 
@@ -34,6 +34,14 @@ export function processingLabel(session: Session): string {
   const chunks = session.transcription?.flatMap((track) => track.chunks) ?? [];
   const saved = chunks.filter((chunk) => chunk.transcript !== null).length;
   if (chunks.length > saved) return `Transcribing · ${saved} of ${chunks.length} parts saved`;
-  if (session.transcript?.trim()) return 'Writing enhanced notes…';
+  if (session.transcript?.trim()) return 'Writing AI notes…';
   return chunks.length ? 'Finishing transcription…' : 'Preparing audio…';
+}
+
+export function recordingTranscriptionLabel(session: Session): string {
+  if (session.liveTranscriptionError) return 'Transcript paused · audio kept';
+  const chunks = session.transcription?.flatMap((track) => track.chunks) ?? [];
+  if (!chunks.length) return 'Transcript starts after the first minute';
+  return chunks.some((chunk) => chunk.transcript === null)
+    ? 'Transcribing in the background' : 'Transcript caught up';
 }

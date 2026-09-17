@@ -134,6 +134,71 @@ fn enrichment() -> String {
         json!({"status":"completed","output":[{"content":[{"type":"output_text","text":"{\"summary\":[\"[SIMULATION] Complete.\"],\"key_points\":[],\"decisions\":[],\"action_items\":[]}"}]}]}),
     )
 }
+
+#[test]
+fn finalized_section_is_checkpointed_before_recording_stops_without_enrichment() {
+    let fixture = Fixture::new();
+    let input = fixture.source(false, 3, false);
+    let info = crate::audio::inspect(&input).unwrap();
+    let duration = info.frames as f64 / info.sample_rate;
+    let path = fixture
+        .root
+        .join("audio")
+        .join(format!("{}-system-segment-00000000.m4a", fixture.id));
+    fs::rename(input, &path).unwrap();
+    let (url, server) = server(
+        vec![text_response("[SIMULATION] Words saved while recording.")],
+        |_| {},
+    );
+    let state = fixture.state(&url);
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Recording;
+    session.segmented_capture = true;
+    session.audio_path = None;
+    session.capture_segments = vec![crate::domain::CaptureSegment {
+        source: AudioSource::System,
+        index: 0,
+        start_seconds: 0.0,
+        duration_seconds: duration,
+    }];
+    session.transcription = vec![SourceTranscript {
+        source: AudioSource::System,
+        chunks: vec![TranscriptChunk {
+            start_seconds: 0.0,
+            duration_seconds: duration,
+            transcript: None,
+            segment_index: Some(0),
+            segments: vec![],
+        }],
+    }];
+    state.store.save(&session).unwrap();
+    let updated = tauri::async_runtime::block_on(process_session_with_key(
+        &state,
+        &fixture.id,
+        "test-only",
+        |_| {},
+    ))
+    .unwrap();
+    let requests = server.join().unwrap();
+    assert_eq!(updated.status, SessionStatus::Recording);
+    assert!(updated
+        .transcript
+        .as_deref()
+        .unwrap()
+        .contains("Words saved while recording"));
+    assert!(updated.enriched_notes.is_none());
+    assert_eq!(updated.original_notes, session.original_notes);
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !path.exists(),
+        "checkpointed section should not accumulate on disk"
+    );
+    let reopened = state.store.get(&fixture.id).unwrap();
+    assert_eq!(
+        reopened.transcription[0].chunks[0].transcript,
+        updated.transcription[0].chunks[0].transcript
+    );
+}
 fn server(
     responses: Vec<String>,
     before_response: impl Fn(usize) + Send + 'static,
@@ -442,6 +507,8 @@ fn reopen_after_final_checkpoint_cleans_scratch_and_reports_silent_source() {
         .map(|source| SourceTranscript {
             source,
             chunks: vec![TranscriptChunk {
+                segment_index: None,
+                segments: Vec::new(),
                 start_seconds: 0.0,
                 duration_seconds: 1.0,
                 transcript: Some(if source == AudioSource::System {
@@ -652,11 +719,15 @@ fn product_no_speech_retry_reopens_only_empty_checkpoints() {
         source: AudioSource::System,
         chunks: vec![
             TranscriptChunk {
+                segment_index: None,
+                segments: Vec::new(),
                 start_seconds: 0.0,
                 duration_seconds: 1.0,
                 transcript: Some("kept".into()),
             },
             TranscriptChunk {
+                segment_index: None,
+                segments: Vec::new(),
                 start_seconds: 1.0,
                 duration_seconds: 1.0,
                 transcript: Some(" \n".into()),
@@ -716,6 +787,8 @@ fn product_no_speech_retry_adopts_settings_and_clears_resolved_warning() {
     session.transcription = vec![SourceTranscript {
         source: AudioSource::System,
         chunks: vec![TranscriptChunk {
+            segment_index: None,
+            segments: Vec::new(),
             start_seconds: 0.0,
             duration_seconds: 1.0,
             transcript: Some(String::new()),
@@ -747,3 +820,6 @@ fn product_no_speech_retry_adopts_settings_and_clears_resolved_warning() {
     assert!(sent[0].contains("gpt-4o-transcribe"));
     assert!(complete.transcript.unwrap().contains("RECOVERED_SPEECH"));
 }
+
+#[path = "live_processing_tests.rs"]
+mod live_tests;

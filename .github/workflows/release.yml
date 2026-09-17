@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ['v0.3.0']
+    tags: ['v0.4.0']
 
 permissions:
   contents: write
@@ -35,6 +35,6 @@ jobs:
       - run: >-
           gh release create "$GITHUB_REF_NAME" Meeting-Notes.dmg
           --title "Meeting Notes $GITHUB_REF_NAME"
-          --notes-file docs/releases/v0.3.0.md
+          --notes-file docs/releases/v0.4.0.md
         env:
           GH_TOKEN: ${{ github.token }}

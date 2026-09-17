@@ -123,3 +123,25 @@ test('native Markdown export passes content without choosing an arbitrary filesy
     assert.match(await api.exportMarkdown('Meeting', '# Original\n\nKeep my words.'), /Downloads\/Meeting-unique.md$/);
   } finally { delete globalThis.window; }
 });
+
+test('new recordings default to speaker detection while explicit settings remain available', () => {
+  assert.equal(api.defaultTranscriptionSettings.model, 'gpt-4o-transcribe-diarize');
+});
+
+test('AI edits, suggestion actions, and refresh preserve exact native meeting scope', async () => {
+  globalThis.window = {};
+  const requests = [];
+  mockIPC((command, payload) => { requests.push({ command, payload }); return { id: 'meeting-1' }; });
+  try {
+    await api.saveAiNotes('meeting-1', '');
+    await api.applySuggestion('meeting-1', 'title', 'apply');
+    await api.applySuggestion('meeting-1', 'participants', 'dismiss');
+    await api.refreshInsights('meeting-1');
+    assert.deepEqual(requests, [
+      { command: 'save_ai_notes', payload: { id: 'meeting-1', notes: '' } },
+      { command: 'apply_suggestion', payload: { id: 'meeting-1', key: 'title', action: 'apply' } },
+      { command: 'apply_suggestion', payload: { id: 'meeting-1', key: 'participants', action: 'dismiss' } },
+      { command: 'refresh_insights', payload: { id: 'meeting-1' } }
+    ]);
+  } finally { delete globalThis.window; }
+});

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { literalHighlights, meetingMarkdown } from './meeting-workspace';
+import {
+  aiNotes,
+  literalHighlights,
+  meetingMarkdown,
+  meetingViewLabel,
+  legacyTranscriptParagraphs,
+  transcriptTurns,
+  validTopicAnchors
+} from './meeting-workspace';
 import type { Session } from './types';
 
 const meeting: Session = {
@@ -63,11 +71,19 @@ describe('meetingMarkdown', () => {
     expect(markdown).toContain('- Context: Quarterly plan &lt;private&gt;');
     expect(markdown).toContain('- Folder: Planning &amp; delivery');
     expect(markdown).toContain('- Capture coverage: elapsed 1:15; system 0:00; microphone 1:12');
-    expect(markdown).toContain('## Original notes\n\nKeep **my** notes &amp; &lt;details&gt;.');
-    expect(markdown).toContain('## Enhanced notes\n\n## Decision\nShip 東京.');
+    expect(markdown).toContain('## Your notes\n\nKeep **my** notes &amp; &lt;details&gt;.');
+    expect(markdown).toContain('## AI notes\n\n## Decision\nShip 東京.');
     expect(markdown).toContain('## Transcript\n\n> Transcript may be incomplete.\n\n[System audio · 00:12] Ship 東京 (v2) [soon].');
     expect(markdown).toContain('## Capture warnings\n\n- Microphone &lt;silent&gt; &amp; retry later.');
     expect(markdown).not.toContain('<script>');
+  });
+
+  it('exports an intentionally blank AI-note edit instead of the generated baseline', () => {
+    const markdown = meetingMarkdown({ ...meeting, editedEnrichedNotes: '' });
+
+    expect(aiNotes({ ...meeting, editedEnrichedNotes: '' })).toBe('');
+    expect(markdown).toContain('## AI notes\n\n_None saved._');
+    expect(markdown).not.toContain('## Decision');
   });
 
   it('keeps explicit empty sections so the export is complete', () => {
@@ -79,8 +95,8 @@ describe('meetingMarkdown', () => {
       warnings: []
     });
 
-    expect(markdown).toContain('## Original notes\n\n_None saved._');
-    expect(markdown).toContain('## Enhanced notes\n\n_None saved._');
+    expect(markdown).toContain('## Your notes\n\n_None saved._');
+    expect(markdown).toContain('## AI notes\n\n_None saved._');
     expect(markdown).toContain('## Transcript\n\n_None saved._');
     expect(markdown).toContain('## Capture warnings\n\n_None._');
   });
@@ -91,5 +107,76 @@ describe('meetingMarkdown', () => {
     expect(markdown).toContain('- Status: failed');
     expect(markdown).toContain('- Processing error: transcription_failed — A later chunk failed.');
     expect(markdown).toContain('## Transcript\n\n> Transcript may be incomplete.\n\n[System audio');
+  });
+});
+
+describe('workspace labels and transcript structure', () => {
+  it('names note ownership plainly', () => {
+    expect((['original', 'enhanced', 'transcript'] as const).map(meetingViewLabel)).toEqual([
+      'Your notes',
+      'AI notes',
+      'Transcript'
+    ]);
+  });
+
+  it('orders turns chronologically and scopes identical speaker labels to each source chunk', () => {
+    const turns = transcriptTurns([
+      {
+        source: 'microphone',
+        chunks: [{ startSeconds: 60, durationSeconds: 30, transcript: 'Later', segmentIndex: 2, segments: [
+          { id: 'turn-1', speaker: 'A', startSeconds: 2, endSeconds: 5, text: 'Later words.' }
+        ] }]
+      },
+      {
+        source: 'system',
+        chunks: [{ startSeconds: 0, durationSeconds: 30, transcript: 'Earlier', segmentIndex: 0, segments: [
+          { id: 'turn-1', speaker: 'A', startSeconds: 1, endSeconds: 4, text: 'Earlier words.' }
+        ] }]
+      }
+    ]);
+
+    expect(turns.map(({ id, speakerKey, text }) => ({ id, speakerKey, text }))).toEqual([
+      { id: 'system:segment-0:offset-0:turn-1', speakerKey: 'system:segment-0:offset-0:A', text: 'Earlier words.' },
+      { id: 'microphone:segment-2:offset-60000:turn-1', speakerKey: 'microphone:segment-2:offset-60000:A', text: 'Later words.' }
+    ]);
+  });
+
+  it('keeps plain chunks alongside diarized turns in mixed recordings', () => {
+    const turns = transcriptTurns({
+      transcript: 'Complete saved transcript.',
+      transcription: [{ source: 'microphone', chunks: [
+        { startSeconds: 0, durationSeconds: 10, transcript: 'Plain opening.', segmentIndex: 0, segments: [] },
+        { startSeconds: 10, durationSeconds: 10, transcript: 'Spoken turn.', segmentIndex: 1, segments: [
+          { id: 'speaker-turn', speaker: 'B', startSeconds: 0, endSeconds: 3, text: 'Spoken turn.' }
+        ] }
+      ] }]
+    });
+
+    expect(turns.map(({ id, speakerKey, text }) => ({ id, speakerKey, text }))).toEqual([
+      { id: 'microphone:segment-0:offset-0:text', speakerKey: null, text: 'Plain opening.' },
+      { id: 'microphone:segment-1:offset-10000:speaker-turn', speakerKey: 'microphone:segment-1:offset-10000:B', text: 'Spoken turn.' }
+    ]);
+  });
+
+  it('gives a legacy whole transcript the backend topic-anchor ID', () => {
+    expect(transcriptTurns({ transcript: 'Legacy saved words.', transcription: [] })).toEqual([
+      expect.objectContaining({ id: 'legacy-transcript', speakerKey: null, text: 'Legacy saved words.' })
+    ]);
+  });
+
+  it('shows only topic anchors that point to a visible turn', () => {
+    expect(validTopicAnchors([
+      { title: 'Budget', startsAtTurnId: 'system:segment-0:offset-0:turn-1', evidence: [] },
+      { title: 'Invented', startsAtTurnId: 'missing', evidence: [] }
+    ], new Set(['system:segment-0:offset-0:turn-1']))).toEqual([
+      { title: 'Budget', startsAtTurnId: 'system:segment-0:offset-0:turn-1', evidence: [] }
+    ]);
+  });
+
+  it('turns legacy text into readable paragraphs without inventing speakers', () => {
+    expect(legacyTranscriptParagraphs('First thought.\n\nSecond thought.\nStill second.')).toEqual([
+      'First thought.',
+      'Second thought.\nStill second.'
+    ]);
   });
 });

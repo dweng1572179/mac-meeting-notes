@@ -72,7 +72,7 @@
   oncancel={(event) => { if (savingKey || savingPreferences) event.preventDefault(); }} onclose={onClose}>
   <button class="dialog-close" type="button" aria-label="Close settings" disabled={savingKey || savingPreferences} onclick={() => dialog.close()}>×</button>
   <h2 id="settings-title">Settings</h2>
-  <p class="settings-copy">Your defaults for clearer meeting transcripts. Original notes always stay yours.</p>
+  <p class="settings-copy">Transcription runs during your meeting. AI notes are prepared once you stop.</p>
 
   <form class="preferences-form" onsubmit={(event) => { event.preventDefault(); void savePreferences(); }}>
     <fieldset disabled={savingPreferences}>
@@ -83,15 +83,16 @@
         {#each languages as item}<option value={item.code}>{item.name}</option>{/each}
       </select>
       <p id="language-help" class="field-help">Choose the spoken language to guide recognition, including regional accents. Use automatic detection for mixed-language meetings.</p>
-      <label for="transcription-model">Accuracy and cost</label>
+      <label for="transcription-model">Transcript style</label>
       <select id="transcription-model" bind:value={model} aria-describedby="model-help">
-        <option value="gpt-4o-mini-transcribe">Standard · lower cost</option>
-        <option value="gpt-4o-transcribe">Higher accuracy · higher cost</option>
+        <option value="gpt-4o-transcribe-diarize">Speaker detection</option>
+        <option value="gpt-4o-mini-transcribe">Text only · lowest cost</option>
+        <option value="gpt-4o-transcribe">Text only · higher accuracy</option>
       </select>
-      <p id="model-help" class="field-help">Higher accuracy can help with difficult speech and terminology. OpenAI bills your API account; recognition is not guaranteed.</p>
+      <p id="model-help" class="field-help">{model === 'gpt-4o-transcribe-diarize' ? 'Separates voices into speaker turns. Speaker labels are local to each audio section; names are suggested only with supporting evidence. Costs more than text-only mini.' : 'Keeps a plain transcript with language and vocabulary hints. Speaker identities are not detected.'} OpenAI bills each audio track; saved sections are not retranscribed on ordinary retries.</p>
       <label for="vocabulary">Names and vocabulary</label>
-      <textarea id="vocabulary" bind:value={vocabulary} rows="3" maxlength="4000" aria-describedby="vocabulary-help" placeholder="Darryl Weng, São Paulo, cap rate, amortization"></textarea>
-      <p id="vocabulary-help" class="field-help">Add names, places, and technical terms, separated by commas or lines. These are recognition hints, not voice training. {[...vocabulary].length.toLocaleString()} / 2,000 characters.</p>
+      <textarea id="vocabulary" bind:value={vocabulary} disabled={model === 'gpt-4o-transcribe-diarize'} rows="3" maxlength="4000" aria-describedby="vocabulary-help" placeholder="Darryl Weng, São Paulo, cap rate, amortization"></textarea>
+      <p id="vocabulary-help" class="field-help">{model === 'gpt-4o-transcribe-diarize' ? 'Speaker detection does not support vocabulary hints. Your saved vocabulary is kept for text-only mode.' : 'Add names, places, and technical terms, separated by commas or lines. These guide recognition; they do not train your voice.'} {[...vocabulary].length.toLocaleString()} / 2,000 characters.</p>
       <div class="preferences-actions">
         <span class="field-help">{dirty ? 'Unsaved changes' : 'Saved defaults'}</span>
         <button class="save-button" type="submit" disabled={!dirty || [...vocabulary].length > 2000}>{savingPreferences ? 'Saving…' : 'Save defaults'}</button>
@@ -102,7 +103,7 @@
 
   <form class="key-form" onsubmit={(event) => { event.preventDefault(); void saveKey(); }}>
     <h3>OpenAI API key</h3>
-    <p class="field-help">{hasApiKey ? 'A key is saved in your Mac Keychain. Enter a new key only to replace it.' : 'Add a key to transcribe recordings and create enhanced notes.'}</p>
+    <p class="field-help">{hasApiKey ? 'A key is saved in your Mac Keychain. Enter a new key only to replace it.' : 'Add a key to transcribe recordings and create AI notes.'}</p>
     <label class="sr-only" for="api-key">API key</label>
     <input bind:this={input} bind:value={apiKey} id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" disabled={savingKey} />
     <div class="preferences-actions">

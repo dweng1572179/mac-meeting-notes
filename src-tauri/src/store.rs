@@ -66,7 +66,7 @@ impl SessionStore {
         validate_directory(&self.root)?;
         let path = self.root.join("settings.json");
         if !validate_file(&path)? {
-            return Ok(TranscriptionSettings::default());
+            return Ok(TranscriptionSettings::new_recording_default());
         }
         let settings: TranscriptionSettings =
             serde_json::from_slice(&fs::read(path).map_err(io_error)?).map_err(json_error)?;
@@ -116,6 +116,11 @@ impl SessionStore {
         Ok(directory)
     }
 
+    pub(crate) fn audio_path(&self, id: &str) -> AppResult<PathBuf> {
+        let path = self.root.join("audio").join(format!("{id}.m4a"));
+        self.validate_audio_path(id, &path.to_string_lossy())
+    }
+
     pub(crate) fn validate_audio_path(&self, id: &str, audio_path: &str) -> AppResult<PathBuf> {
         self.validate_named_audio_path(id, audio_path, &format!("{id}.m4a"))
     }
@@ -132,6 +137,55 @@ impl SessionStore {
         let filename = format!("{id}-{}-chunk.m4a", source.filename());
         let path = self.root.join("audio").join(&filename);
         self.validate_named_audio_path(id, &path.to_string_lossy(), &filename)
+    }
+
+    pub(crate) fn segment_path(
+        &self,
+        id: &str,
+        source: AudioSource,
+        index: u64,
+    ) -> AppResult<PathBuf> {
+        if index > 99_999_999 {
+            return Err(invalid_audio_path());
+        }
+        let filename = format!("{id}-{}-segment-{index:08}.m4a", source.filename());
+        let path = self.root.join("audio").join(&filename);
+        self.validate_named_audio_path(id, &path.to_string_lossy(), &filename)
+    }
+
+    // Only canonical names belong to this meeting. Never follow links during recovery or deletion.
+    pub(crate) fn segment_files(&self, id: &str) -> AppResult<Vec<(AudioSource, u64, PathBuf)>> {
+        self.validate_id(id)?;
+        validate_directory(&self.root)?;
+        let directory = self.root.join("audio");
+        validate_directory(&directory)?;
+        if !directory.try_exists().map_err(io_error)? {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::new();
+        for entry in fs::read_dir(directory).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            for source in [AudioSource::System, AudioSource::Microphone] {
+                let prefix = format!("{id}-{}-segment-", source.filename());
+                let Some(index) = name
+                    .strip_prefix(&prefix)
+                    .and_then(|name| name.strip_suffix(".m4a"))
+                else {
+                    continue;
+                };
+                if index.len() != 8 || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+                    continue;
+                }
+                let index: u64 = index.parse().map_err(|_| invalid_audio_path())?;
+                files.push((source, index, self.segment_path(id, source, index)?));
+            }
+        }
+        files.sort_by_key(|(source, index, _)| (source.filename(), *index));
+        Ok(files)
     }
 
     fn validate_named_audio_path(
@@ -204,10 +258,19 @@ impl SessionStore {
                 .map(|path| self.validate_microphone_audio_path(id, path)),
         ];
         let mut removed_audio = false;
-        for audio_path in audio_paths.into_iter().flatten().chain([
-            self.chunk_path(id, AudioSource::System),
-            self.chunk_path(id, AudioSource::Microphone),
-        ]) {
+        for audio_path in audio_paths
+            .into_iter()
+            .flatten()
+            .chain([
+                self.chunk_path(id, AudioSource::System),
+                self.chunk_path(id, AudioSource::Microphone),
+            ])
+            .chain(
+                self.segment_files(id)?
+                    .into_iter()
+                    .map(|(_, _, path)| Ok(path)),
+            )
+        {
             let audio_path = audio_path?;
             match fs::remove_file(audio_path) {
                 Ok(()) => removed_audio = true,
@@ -253,6 +316,26 @@ fn validate_transcription(session: &Session) -> AppResult<()> {
             "Saved transcription progress is invalid. Your meeting files were kept.",
         )
     };
+    for (index, segment) in session.capture_segments.iter().enumerate() {
+        if !session.segmented_capture
+            || segment.index > 99_999_999
+            || !segment.start_seconds.is_finite()
+            || segment.start_seconds < 0.0
+            || !segment.duration_seconds.is_finite()
+            || segment.duration_seconds <= 0.0
+            || !(segment.start_seconds + segment.duration_seconds).is_finite()
+            || session.capture_segments[..index].iter().any(|other| {
+                other.source == segment.source
+                    && (other.index == segment.index
+                        || (other.start_seconds
+                            < segment.start_seconds + segment.duration_seconds - 0.000_001
+                            && segment.start_seconds
+                                < other.start_seconds + other.duration_seconds - 0.000_001))
+            })
+        {
+            return Err(invalid());
+        }
+    }
     for (index, track) in session.transcription.iter().enumerate() {
         if session.transcription[..index]
             .iter()
@@ -266,11 +349,60 @@ fn validate_transcription(session: &Session) -> AppResult<()> {
                 || !chunk.duration_seconds.is_finite()
                 || chunk.duration_seconds <= 0.0
                 || chunk.duration_seconds > 300.0
-                || (chunk.start_seconds - end).abs() > 0.000_001
+                || chunk.start_seconds < 0.0
+                || if session.segmented_capture {
+                    chunk.start_seconds < end - 0.000_001
+                } else {
+                    (chunk.start_seconds - end).abs() > 0.000_001
+                }
             {
                 return Err(invalid());
             }
+            if let Some(index) = chunk.segment_index {
+                let Some(segment) = session
+                    .capture_segments
+                    .iter()
+                    .find(|segment| segment.source == track.source && segment.index == index)
+                else {
+                    return Err(invalid());
+                };
+                if chunk.start_seconds < segment.start_seconds - 0.000_001
+                    || chunk.start_seconds + chunk.duration_seconds
+                        > segment.start_seconds + segment.duration_seconds + 0.000_001
+                {
+                    return Err(invalid());
+                }
+            } else if session.segmented_capture {
+                return Err(invalid());
+            }
+            if !chunk.segments.is_empty() {
+                if chunk.transcript.is_none() {
+                    return Err(invalid());
+                }
+                crate::domain::validate_transcript_segments(
+                    &chunk.segments,
+                    chunk.duration_seconds,
+                )?;
+            }
             end = chunk.start_seconds + chunk.duration_seconds;
+        }
+    }
+    for segment in &session.capture_segments {
+        let mut end = segment.start_seconds;
+        for chunk in session
+            .transcription
+            .iter()
+            .filter(|track| track.source == segment.source)
+            .flat_map(|track| &track.chunks)
+            .filter(|chunk| chunk.segment_index == Some(segment.index))
+        {
+            if (chunk.start_seconds - end).abs() > 0.000_001 {
+                return Err(invalid());
+            }
+            end = chunk.start_seconds + chunk.duration_seconds;
+        }
+        if (end - segment.start_seconds - segment.duration_seconds).abs() > 0.000_001 {
+            return Err(invalid());
         }
     }
     Ok(())

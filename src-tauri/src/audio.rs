@@ -292,7 +292,7 @@ mod native {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use objc2_audio_toolbox::{ExtAudioFileDispose, ExtAudioFileOpenURL, ExtAudioFileRead};
     use objc2_core_audio_types::{
@@ -353,7 +353,7 @@ mod tests {
         file.flush().unwrap();
     }
 
-    fn decoded_tone(path: &Path) -> (u64, f64, f64) {
+    pub(crate) fn decoded_tone(path: &Path) -> (u64, f64, f64) {
         let url = CFURL::from_file_path(path).unwrap();
         let mut raw = ptr::null_mut();
         assert_eq!(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nextMeetingView } from './MeetingEditor.svelte';
+import { dirtyAiNotesDraft, flushMeetingDrafts, metadataAfterSuggestion, nextMeetingView } from './MeetingEditor.svelte';
 import { captureErrorMessage, elapsedRecordingSeconds } from './RecordingDock.svelte';
 
 describe('nextMeetingView', () => {
@@ -13,6 +13,54 @@ describe('nextMeetingView', () => {
 
   it('keeps the transcript visible when processing finishes', () => {
     expect(nextMeetingView('transcript', 'processing', 'complete', false)).toBe('transcript');
+  });
+});
+
+describe('dirtyAiNotesDraft', () => {
+  it('returns edited text, including an intentional blank, while the editor is open', () => {
+    expect(dirtyAiNotesDraft(true, 'Revised notes', 'Generated notes')).toBe('Revised notes');
+    expect(dirtyAiNotesDraft(true, '', 'Generated notes')).toBe('');
+  });
+
+  it('does not persist a closed or unchanged draft during navigation', () => {
+    expect(dirtyAiNotesDraft(false, 'Revised notes', 'Generated notes')).toBeUndefined();
+    expect(dirtyAiNotesDraft(true, 'Generated notes', 'Generated notes')).toBeUndefined();
+  });
+});
+
+describe('flushMeetingDrafts', () => {
+  it('waits for original notes before saving a dirty AI draft', async () => {
+    const events: string[] = [];
+    await flushMeetingDrafts(
+      async () => void events.push('original'),
+      () => 'AI draft',
+      async (draft) => void events.push(draft)
+    );
+    expect(events).toEqual(['original', 'AI draft']);
+  });
+
+  it('includes typing that occurs while the original notes are saving', async () => {
+    let draft = 'Earlier draft';
+    let saved = '';
+    await flushMeetingDrafts(async () => { await Promise.resolve(); draft = 'Latest typed draft'; },
+      () => draft, async (value) => { saved = value; });
+    expect(saved).toBe('Latest typed draft');
+  });
+
+  it('rejects when the AI draft cannot be saved so navigation stays blocked', async () => {
+    await expect(
+      flushMeetingDrafts(async () => {}, () => '', async () => { throw new Error('disk full'); })
+    ).rejects.toThrow('disk full');
+  });
+});
+
+it('merges a delayed suggestion response without replacing unrelated local metadata', () => {
+  const current = { title: 'Typed title', context: 'New local context', folder: 'Local folder', attendees: 'Ari' };
+  const staleResponse = { title: 'Suggested title', context: 'Old context', folder: 'Old folder', attendees: 'Old attendee' };
+
+  expect(metadataAfterSuggestion(current, 'title', staleResponse)).toEqual({
+    ...current,
+    title: 'Suggested title'
   });
 });
 
