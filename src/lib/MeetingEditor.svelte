@@ -1,35 +1,10 @@
 <script module lang="ts">
-  import type { SessionStatus } from './types';
+  import type { UpdateSessionInput } from './types';
 
-  export type MeetingView = 'original' | 'enhanced' | 'transcript';
-
-  export function nextMeetingView(
-    current: MeetingView,
-    previousStatus: SessionStatus,
-    nextStatus: SessionStatus,
-    originalUsedWhileProcessing: boolean
-  ): MeetingView {
-    return current !== 'transcript' && previousStatus === 'processing' && nextStatus === 'complete' && !originalUsedWhileProcessing
-      ? 'enhanced'
-      : current;
-  }
-
-  export function dirtyAiNotesDraft(
-    editing: boolean,
-    draft: string,
-    savedNotes: string
-  ): string | undefined {
-    return editing && draft !== savedNotes ? draft : undefined;
-  }
-
-  export async function flushMeetingDrafts(
-    flushOriginal: () => Promise<void>,
-    readAiDraft: () => string | undefined,
-    saveAiDraft: (draft: string) => Promise<void>
-  ): Promise<void> {
-    await flushOriginal();
-    const aiDraft = readAiDraft();
-    if (aiDraft !== undefined) await saveAiDraft(aiDraft);
+  export function unsavedNotesInput(input: UpdateSessionInput, revision: number, savedRevision: number): UpdateSessionInput {
+    if (revision > savedRevision) return input;
+    const { notes: _acknowledged, ...metadata } = input;
+    return metadata;
   }
 
   export type SuggestionKey = 'title' | 'context' | 'category' | 'participants';
@@ -57,18 +32,17 @@
     exportMarkdown,
     onWindowCloseRequested,
     refreshInsights,
-    saveAiNotes,
     saveSession
   } from './api';
   import { createAutosave } from './autosave';
   import { parseMeetingMarkdown } from './markdown';
   import InlineMarkdown from './InlineMarkdown.svelte';
-  import { aiNotes, meetingMarkdown, meetingViewLabel } from './meeting-workspace';
+  import { meetingNotes, meetingMarkdown } from './meeting-workspace';
   import MeetingQuestion from './MeetingQuestion.svelte';
   import { errorMessage } from './recovery';
   import RecordingDock, { captureCoverage } from './RecordingDock.svelte';
   import TranscriptView from './TranscriptView.svelte';
-  import type { RecordingHealth, Session, UpdateSessionInput } from './types';
+  import type { RecordingHealth, Session } from './types';
 
   let {
     session,
@@ -99,35 +73,34 @@
   let context = $state(initial(() => session.context));
   let attendees = $state(initial(() => session.attendees.join(', ')));
   let folder = $state(initial(() => session.folder));
-  let originalNotes = $state(initial(() => session.originalNotes));
-  let view = $state<MeetingView>(
-    initial(() => (session.status === 'complete' ? 'enhanced' : 'original'))
-  );
-  let saveStatus = $state('');
+  let notes = $state(initial(() => meetingNotes(session)));
+  let notesRevision = $state(0);
+  let savedNotesRevision = $state(0);
+  let notesDirty = $derived(notesRevision > savedNotesRevision);
+  let view = $state<'notes' | 'transcript'>('notes');
+  let editingNotes = $state(initial(() => session.status !== 'complete'));
   let lastStatus = initial(() => session.status);
-  let originalUsedWhileProcessing = false;
+  let saveStatus = $state('');
   let confirmation = $state<'transcript' | 'meeting' | null>(null);
   let deleting = $state(false);
   let deleteError = $state('');
   let menuExporting = $state(false);
   let menuExportStatus = $state('');
   let menuExportError = $state(false);
-  let editingAiNotes = $state(false);
-  let aiNotesDraft = $state('');
-  let aiNotesSaving = $state(false);
-  let aiNotesSave: Promise<void> | null = null;
-  let aiNotesError = $state('');
   let suggestionPending = $state('');
   let suggestionError = $state('');
   let refreshing = $state(false);
   let actionMenu: HTMLDivElement;
   let confirmationDialog: HTMLDialogElement;
 
-  const autosave = createAutosave<UpdateSessionInput>(450, async (input) => {
+  const autosave = createAutosave<{ input: UpdateSessionInput; revision: number }>(450, async ({ input, revision }) => {
     saveStatus = 'Saving…';
     try {
-      onSessionChange(await saveSession(input));
-      saveStatus = 'Saved';
+      const value = unsavedNotesInput(input, revision, savedNotesRevision);
+      const updated = await saveSession(value);
+      if (value.notes !== undefined) savedNotesRevision = revision;
+      onSessionChange(updated);
+      saveStatus = notesDirty ? 'Unsaved' : 'Saved';
     } catch (error) {
       saveStatus = errorMessage(error, 'Changes could not be saved. Keep this window open and try editing again.');
       throw error;
@@ -135,12 +108,9 @@
   });
 
   $effect(() => {
-    if (session.status === 'processing' && lastStatus !== 'processing') {
-      originalUsedWhileProcessing = document.activeElement?.id === 'original-notes';
-    }
-    view = nextMeetingView(view, lastStatus, session.status, originalUsedWhileProcessing);
-    if (view === 'transcript' && session.transcript === null) view = 'original';
-    if (session.status !== 'processing') originalUsedWhileProcessing = false;
+    if (!notesDirty && !editingNotes) notes = meetingNotes(session);
+    if (session.status === 'complete' && lastStatus !== 'complete' && !notesDirty && document.activeElement?.id !== 'meeting-notes') editingNotes = false;
+    if (view === 'transcript' && session.transcript === null) view = 'notes';
     lastStatus = session.status;
   });
 
@@ -157,13 +127,14 @@
       context,
       attendees: attendees.split(',').map((name) => name.trim()).filter(Boolean),
       folder,
-      originalNotes
+      originalNotes: session.originalNotes,
+      ...(notesDirty ? { notes } : {})
     };
   }
 
   function scheduleSave() {
     saveStatus = 'Unsaved';
-    autosave.schedule(input());
+    autosave.schedule({ input: input(), revision: notesRevision });
   }
 
   function updateTitle(event: Event) {
@@ -187,21 +158,22 @@
   }
 
   function updateNotes(event: Event) {
-    markOriginalUse();
-    originalNotes = (event.currentTarget as HTMLTextAreaElement).value;
+    notes = (event.currentTarget as HTMLTextAreaElement).value;
+    notesRevision += 1;
     scheduleSave();
   }
 
-  function markOriginalUse() {
-    if (session.status === 'processing') originalUsedWhileProcessing = true;
+  export async function flush() {
+    await autosave.flush();
   }
 
-  export async function flush() {
-    await flushMeetingDrafts(async () => {
-      await autosave.flush();
-      if (aiNotesSave) await aiNotesSave;
-    },
-      () => dirtyAiNotesDraft(editingAiNotes, aiNotesDraft, aiNotes(session) ?? ''), saveAiNotesValue);
+  async function finishEditing() {
+    try {
+      await flush();
+      editingNotes = false;
+    } catch {
+      // Keep the unsaved document visible; Retry save uses the same queued draft.
+    }
   }
 
   function currentSession(): Session {
@@ -211,7 +183,7 @@
       context,
       attendees: input().attendees,
       folder,
-      originalNotes
+      notes
     };
   }
 
@@ -223,45 +195,6 @@
   async function askCurrentMeeting(question: string) {
     await flush();
     return askMeeting(session.id, question);
-  }
-
-  function beginAiNoteEdit() {
-    aiNotesDraft = aiNotes(session) ?? '';
-    aiNotesError = '';
-    editingAiNotes = true;
-  }
-
-  function saveAiNotesValue(notes: string | null): Promise<void> {
-    if (aiNotesSave) return aiNotesSave;
-    aiNotesSaving = true;
-    aiNotesError = '';
-    aiNotesSave = (async () => {
-      try {
-        const updated = await saveAiNotes(session.id, notes);
-        onSessionChange(updated);
-        aiNotesDraft = aiNotes(updated) ?? '';
-        editingAiNotes = false;
-      } catch (error) {
-        aiNotesError = errorMessage(error, 'AI notes could not be saved. Your typed notes were kept.');
-        throw error;
-      } finally {
-        aiNotesSaving = false;
-        aiNotesSave = null;
-      }
-    })();
-    return aiNotesSave;
-  }
-
-  async function persistAiNotes(notes: string | null) {
-    aiNotesSaving = true;
-    try {
-      await autosave.flush();
-      await saveAiNotesValue(notes);
-    } catch {
-      // The editor stays open with its draft and the inline error offers another save attempt.
-    } finally {
-      aiNotesSaving = false;
-    }
   }
 
   async function changeSuggestion(key: SuggestionKey, action: 'apply' | 'dismiss') {
@@ -293,10 +226,10 @@
     try {
       await flush();
       onSessionChange(await refreshInsights(session.id));
-      menuExportStatus = 'AI notes and suggestions refreshed from saved text.';
+      menuExportStatus = 'Notes updated from saved text.';
     } catch (error) {
       menuExportError = true;
-      menuExportStatus = errorMessage(error, 'AI notes could not be refreshed. Your saved text was kept.');
+      menuExportStatus = errorMessage(error, 'Notes could not be updated. Your saved text was kept.');
     } finally {
       refreshing = false;
     }
@@ -362,8 +295,8 @@
       <button type="button" disabled={menuExporting} onclick={exportFromMenu}>
         {menuExporting ? 'Saving…' : 'Export Markdown'}
       </button>
-      {#if session.status === 'complete' && (session.transcript || session.originalNotes || session.enrichedNotes)}
-        <button type="button" disabled={refreshing} onclick={refreshMeetingInsights}>{refreshing ? 'Refreshing…' : 'Refresh AI notes'}</button>
+      {#if session.status === 'complete' && session.transcript}
+        <button type="button" disabled={refreshing} onclick={refreshMeetingInsights}>{refreshing ? 'Refreshing…' : 'Update notes from transcript'}</button>
       {/if}
       <button
         class="danger-action"
@@ -449,47 +382,37 @@
 
   <section class="notes-section" aria-labelledby="notes-title">
     <div class="notes-heading-row">
-      <div><h2 id="notes-title">{meetingViewLabel(view)}</h2><p class="view-description">{view === 'original' ? 'Notes you wrote yourself.' : view === 'enhanced' ? 'Editable notes generated from saved meeting text.' : 'Saved words organized for reading.'}</p></div>
-      {#if session.status === 'complete' || session.transcript !== null}
-        <div class="result-switch" aria-label="Note version">
-          <button
-            type="button"
-            class:active={view === 'original'}
-            aria-pressed={view === 'original'}
-            onclick={() => (view = 'original')}
-          >Your notes</button>
-          {#if session.status === 'complete'}
-            <button
-              type="button"
-              class:active={view === 'enhanced'}
-              aria-pressed={view === 'enhanced'}
-              onclick={() => (view = 'enhanced')}
-            >AI notes</button>
-          {/if}
-          {#if session.transcript !== null}
-            <button
-              type="button"
-              class:active={view === 'transcript'}
-              aria-pressed={view === 'transcript'}
-              onclick={() => (view = 'transcript')}
-            >Transcript</button>
-          {/if}
-        </div>
-      {/if}
+      <h2 id="notes-title">{view === 'notes' ? 'Notes' : 'Transcript'}</h2>
+      <div class="notes-controls">
+        {#if view === 'notes'}
+          <button class="edit-notes" type="button" onclick={() => editingNotes ? finishEditing() : (editingNotes = true)}>{editingNotes ? 'Done' : 'Edit notes'}</button>
+        {/if}
+        {#if session.transcript !== null}
+          <div class="result-switch" aria-label="Meeting content">
+            <button type="button" class:active={view === 'notes'} aria-pressed={view === 'notes'} onclick={() => (view = 'notes')}>Notes</button>
+            <button type="button" class:active={view === 'transcript'} aria-pressed={view === 'transcript'} onclick={() => (view = 'transcript')}>Transcript</button>
+          </div>
+        {/if}
+      </div>
     </div>
 
     {#if view === 'transcript' && session.transcript !== null}
       <TranscriptView {session} onExport={exportCurrentMeeting} />
-    {:else if view === 'enhanced'}
-      <div class="ai-notes-toolbar">
-        {#if !editingAiNotes}<button type="button" disabled={aiNotesSaving} onclick={beginAiNoteEdit}>Edit AI notes</button>{/if}
-        {#if session.editedEnrichedNotes !== null && session.editedEnrichedNotes !== undefined && !editingAiNotes}<button type="button" disabled={aiNotesSaving} onclick={() => persistAiNotes(null)}>Restore generated</button>{/if}
-      </div>
-      {#if editingAiNotes}
-        <div class="ai-notes-editor"><textarea bind:value={aiNotesDraft} rows="12" dir="auto" disabled={aiNotesSaving}></textarea><div><button type="button" disabled={aiNotesSaving} onclick={() => (editingAiNotes = false)}>Cancel</button><button class="primary" type="button" disabled={aiNotesSaving} onclick={() => persistAiNotes(aiNotesDraft)}>{aiNotesSaving ? 'Saving…' : 'Save AI notes'}</button></div></div>
-      {:else if aiNotes(session)}
+    {:else if editingNotes}
+      <label class="sr-only" for="meeting-notes">Meeting notes</label>
+      <textarea
+        class="notes-editor"
+        class:empty={!notes}
+        id="meeting-notes"
+        value={notes}
+        oninput={updateNotes}
+        placeholder="Start with the questions, numbers, and decisions you want to remember."
+        spellcheck="true"
+        dir="auto"
+      ></textarea>
+    {:else if notes}
       <div class="enhanced-notes" dir="auto">
-        {#each parseMeetingMarkdown(aiNotes(session) ?? '') as block}
+        {#each parseMeetingMarkdown(notes) as block}
           {#if block.kind === 'heading'}
             <h3><InlineMarkdown text={block.text} /></h3>
           {:else if block.kind === 'bullet'}
@@ -499,23 +422,8 @@
           {/if}
         {/each}
       </div>
-      {:else}
-        <div class="notes-empty"><p>No AI notes are saved for this meeting.</p>{#if session.status === 'complete'}<button type="button" onclick={refreshMeetingInsights}>Create from saved text</button>{/if}</div>
-      {/if}
-      {#if aiNotesError}<p class="deletion-error" role="alert">{aiNotesError}</p>{/if}
     {:else}
-      <label class="sr-only" for="original-notes">Original meeting notes</label>
-      <textarea
-        class="notes-editor"
-        class:empty={!originalNotes}
-        id="original-notes"
-        value={originalNotes}
-        oninput={updateNotes}
-        onfocus={markOriginalUse}
-        placeholder={originalNotes ? '' : ['complete', 'failed'].includes(session.status) ? 'You didn’t type notes during this meeting. Add anything you want to keep.' : 'Start with the questions, numbers, and decisions you want to remember.'}
-        spellcheck="true"
-        dir="auto"
-      ></textarea>
+      <div class="notes-empty"><p>No notes yet.</p><button type="button" onclick={() => (editingNotes = true)}>Add notes</button></div>
     {/if}
 
     <div class="save-row">
@@ -548,7 +456,7 @@
     </h2>
     <p class="settings-copy">
       {#if confirmation === 'transcript'}
-        The transcript and AI notes will be permanently removed. Your notes and any retained audio will stay.
+        The transcript will be permanently removed. Your notes and any retained audio will stay.
       {:else if session.audioPath !== null || session.microphoneAudioPath !== null}
         This meeting, its notes, and its retained audio recording will be permanently removed.
       {:else}
@@ -693,8 +601,6 @@
   .field-suggestion > div { display: inline-flex; flex: 0 0 auto; gap: 5px; }
 
   .field-suggestion button,
-  .ai-notes-toolbar button,
-  .ai-notes-editor button,
   .notes-empty button {
     padding: 4px 7px;
     border: 0;
@@ -722,12 +628,9 @@
   .capture-disclosure summary { width: fit-content; cursor: pointer; font-weight: 650; }
   .capture-disclosure p { margin: 7px 0 0; }
 
-  .ai-notes-toolbar { display: flex; justify-content: flex-end; gap: 6px; min-height: 27px; margin-bottom: 7px; }
-  .ai-notes-toolbar button { color: var(--muted-text); background: transparent; }
-  .ai-notes-editor { display: grid; gap: 9px; }
-  .ai-notes-editor textarea { width: 100%; min-height: 260px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; resize: vertical; color: var(--ink); background: color-mix(in srgb, var(--paper) 76%, var(--sidebar)); font: inherit; font-size: 15px; line-height: 1.65; }
-  .ai-notes-editor > div { display: flex; justify-content: flex-end; gap: 7px; }
-  .ai-notes-editor button.primary { color: #fff; background: var(--accent-text); }
+  .notes-controls { display: flex; align-items: center; gap: 14px; }
+  .edit-notes { padding: 6px 0; border: 0; color: var(--muted-text); background: transparent; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .edit-notes:hover { color: var(--ink); }
   .notes-empty { padding: 30px 0 50px; color: var(--muted-text); }
   .notes-empty p { margin: 0 0 12px; }
 

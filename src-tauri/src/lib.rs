@@ -18,7 +18,6 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::bootstrap,
             commands::create_session,
             commands::save_session,
-            commands::insights::save_ai_notes,
             commands::insights::apply_suggestion,
             commands::insights::refresh_insights,
             commands::start_recording,

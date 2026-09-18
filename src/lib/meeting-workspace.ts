@@ -23,14 +23,12 @@ type TranscriptTrack = {
   }[];
 };
 
-export function meetingViewLabel(view: 'original' | 'enhanced' | 'transcript') {
-  return { original: 'Your notes', enhanced: 'AI notes', transcript: 'Transcript' }[view];
-}
-
-export function aiNotes(session: Pick<Session, 'enrichedNotes'> & { editedEnrichedNotes?: string | null }) {
-  return session.editedEnrichedNotes !== null && session.editedEnrichedNotes !== undefined
-    ? session.editedEnrichedNotes
-    : session.enrichedNotes;
+export function meetingNotes(session: Pick<Session, 'notes' | 'originalNotes' | 'enrichedNotes' | 'editedEnrichedNotes'>): string {
+  if (session.notes !== null && session.notes !== undefined) return session.notes;
+  const summary = session.editedEnrichedNotes ?? session.enrichedNotes ?? '';
+  const original = session.originalNotes.trim();
+  if (!summary.trim()) return session.originalNotes;
+  return original && !summary.includes(original) ? `${summary}\n\n${session.originalNotes}` : summary;
 }
 
 export function transcriptTurns(input: TranscriptTrack[] | { transcription?: TranscriptTrack[]; transcript?: string | null } = []): TranscriptTurn[] {
@@ -143,8 +141,7 @@ export function meetingMarkdown(session: Session): string {
   return [
     `# ${safe(session.title || 'Untitled meeting')}`,
     metadata.join('\n'),
-    section('Your notes', session.originalNotes),
-    section('AI notes', aiNotes(session)),
+    section('Notes', meetingNotes(session)),
     transcriptSection,
     section('Capture warnings', warnings, '_None._')
   ].join('\n\n');

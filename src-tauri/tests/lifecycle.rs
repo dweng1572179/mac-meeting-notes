@@ -297,3 +297,16 @@ fn speaker_turn_keys_separate_uploads_sources_and_adaptive_splits() {
         .any(|source| source.id == "raw:system:segment-1:offset-90000"
             && source.text.ends_with("EXTRA")));
 }
+
+#[test]
+fn deleting_transcript_keeps_the_visible_notes_document() {
+    let mut source = failed_with_transcript();
+    source.enriched_notes = Some("Saved summary".into());
+    for edit in [None, Some("My revision".into()), Some(String::new())] {
+        source.edited_enriched_notes = edit;
+        let reset = transcript_deleted(source.clone()).unwrap();
+        assert_eq!(reset.notes(), source.notes());
+        assert_eq!(reset.original_notes, source.original_notes);
+        assert!(reset.transcript.is_none());
+    }
+}

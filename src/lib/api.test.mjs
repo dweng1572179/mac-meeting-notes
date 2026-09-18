@@ -128,17 +128,18 @@ test('new recordings default to speaker detection while explicit settings remain
   assert.equal(api.defaultTranscriptionSettings.model, 'gpt-4o-transcribe-diarize');
 });
 
-test('AI edits, suggestion actions, and refresh preserve exact native meeting scope', async () => {
+test('Note edits, suggestion actions, and refresh preserve exact native meeting scope', async () => {
   globalThis.window = {};
   const requests = [];
   mockIPC((command, payload) => { requests.push({ command, payload }); return { id: 'meeting-1' }; });
   try {
-    await api.saveAiNotes('meeting-1', '');
+    const input = { id: 'meeting-1', title: 'Meeting', context: '', attendees: [], folder: '', originalNotes: 'Legacy', notes: '' };
+    await api.saveSession(input);
     await api.applySuggestion('meeting-1', 'title', 'apply');
     await api.applySuggestion('meeting-1', 'participants', 'dismiss');
     await api.refreshInsights('meeting-1');
     assert.deepEqual(requests, [
-      { command: 'save_ai_notes', payload: { id: 'meeting-1', notes: '' } },
+      { command: 'save_session', payload: { input } },
       { command: 'apply_suggestion', payload: { id: 'meeting-1', key: 'title', action: 'apply' } },
       { command: 'apply_suggestion', payload: { id: 'meeting-1', key: 'participants', action: 'dismiss' } },
       { command: 'refresh_insights', payload: { id: 'meeting-1' } }

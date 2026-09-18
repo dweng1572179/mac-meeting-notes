@@ -72,7 +72,7 @@
   oncancel={(event) => { if (savingKey || savingPreferences) event.preventDefault(); }} onclose={onClose}>
   <button class="dialog-close" type="button" aria-label="Close settings" disabled={savingKey || savingPreferences} onclick={() => dialog.close()}>×</button>
   <h2 id="settings-title">Settings</h2>
-  <p class="settings-copy">Transcription runs during your meeting. AI notes are prepared once you stop.</p>
+  <p class="settings-copy">Transcription runs during your meeting. notes are prepared once you stop.</p>
 
   <form class="preferences-form" onsubmit={(event) => { event.preventDefault(); void savePreferences(); }}>
     <fieldset disabled={savingPreferences}>
@@ -103,7 +103,7 @@
 
   <form class="key-form" onsubmit={(event) => { event.preventDefault(); void saveKey(); }}>
     <h3>OpenAI API key</h3>
-    <p class="field-help">{hasApiKey ? 'A key is saved in your Mac Keychain. Enter a new key only to replace it.' : 'Add a key to transcribe recordings and create AI notes.'}</p>
+    <p class="field-help">{hasApiKey ? 'A key is saved in your Mac Keychain. Enter a new key only to replace it.' : 'Add a key to transcribe recordings and create notes.'}</p>
     <label class="sr-only" for="api-key">API key</label>
     <input bind:this={input} bind:value={apiKey} id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" disabled={savingKey} />
     <div class="preferences-actions">

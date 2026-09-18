@@ -8,14 +8,14 @@ A lightweight macOS meeting notepad that records your microphone and computer au
 - Finalizes native AAC sections around every 60 seconds and transcribes them sequentially while recording continues. Stop saves the final tails and finishes pending work; this is section-based transcription, not word-by-word live captions.
 - Saves each completed transcription before deleting its audio. Ordinary retries reuse saved progress; dense sections that reach the model output limit are split further. A network failure pauses transcription without stopping capture.
 - Shows missing/stalled-source warnings and separate elapsed/captured durations. Partial transcripts and capture warnings survive interruptions.
-- Separates **Your notes**, **AI notes**, and **Transcript**. Typed notes stay yours; editable AI notes retain their generated baseline, and an empty typed-notes view says when no notes were entered.
+- Opens every meeting as one editable **Notes** document, with **Transcript** as its reference. Notes autosave before navigation, export, and questions. Older meetings retain manual text missing from their summary; deleting a transcript keeps the notes.
 - Displays timed speaker turns when speaker detection is selected, with searchable text, source labels, topic navigation, and access to the raw transcript. Plain transcripts use paragraphs and quiet timestamps instead of repeating section headings. Speaker labels are local to each source/upload; matching labels in different sections do not identify the same person.
 - Produces notes plus suggested title, context, category, participants, and topic anchors in one structured enrichment response. Suggestions carry exact supporting excerpts and require your acceptance; they never silently replace manual fields. Suggestions without verified evidence are omitted while usable notes are kept.
-- Refreshes AI notes and suggestions for completed meetings from saved transcript text. This does not recreate missing audio or add genuine speaker attribution to older plain transcripts. Your AI-note edits remain separate from refreshed generated notes.
+- **Update notes from transcript** refreshes a completed meeting using its current notes and saved transcript. Edits made while that request runs take priority over its result. This does not recreate missing audio or add speaker attribution to older plain transcripts.
 - Exports Markdown to Downloads with notes, transcript, meeting details, and capture warnings. Incomplete processing is labeled.
 - Saves language and recognition preferences. New installations with no saved preferences default to speaker detection; existing saved choices remain unchanged. Text-only options retain vocabulary hints.
 - Organizes meetings with local categories/folders, a timeline-style library, and search across meeting details, notes, and transcripts.
-- Answers meeting and library questions with exact-source citations. Oversized source selections produce a clear error instead of silently dropping later decisions. Both question views use a compact, expanding composer with Command/Ctrl+Enter and expandable sources. Failed requests keep the question for retry.
+- Answers meeting and library questions with saved-passage citations. The model selects passage IDs and the app supplies the exact source text; unavailable answers are normal responses. Oversized source selections produce a clear error instead of silently dropping later decisions. Both question views use a compact, expanding composer with Command/Ctrl+Enter and expandable sources. Failed requests keep the question for retry.
 
 ## Privacy
 
@@ -96,7 +96,7 @@ A failure between an API response and its durable checkpoint can require that re
 - Language/vocabulary controls are not an accent benchmark. Physical Bluetooth switching and long real-world capture still need broader validation.
 - Folders and notes are local to one Mac; there are no accounts, shared workspaces, or team sync.
 - This beta is ad-hoc signed but not notarized. macOS 14 requires a one-time right-click **Open**; macOS 15 or later requires trying the first launch, then **System Settings → Privacy & Security → Open Anyway**.
-- Model output can be incomplete or wrong. Review AI notes, suggestions, and speaker turns against the source transcript and Your notes. A supporting quote does not make an inference infallible.
+- Model output can be incomplete or wrong. Review notes, suggestions, and speaker turns against the source transcript. A supporting quote does not make an inference infallible.
 - Speaker labels are local to each source/upload, not a verified participant directory. Cross-section identity matching and Zoom/Teams name association are not implemented.
 - Completed legacy transcripts can receive refreshed notes and suggestions, but plain text alone cannot recover voice identities.
 

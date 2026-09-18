@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  aiNotes,
+  meetingNotes,
   literalHighlights,
   meetingMarkdown,
-  meetingViewLabel,
   legacyTranscriptParagraphs,
   transcriptParagraphs,
   transcriptTurns,
@@ -72,18 +71,18 @@ describe('meetingMarkdown', () => {
     expect(markdown).toContain('- Context: Quarterly plan &lt;private&gt;');
     expect(markdown).toContain('- Folder: Planning &amp; delivery');
     expect(markdown).toContain('- Capture coverage: elapsed 1:15; system 0:00; microphone 1:12');
-    expect(markdown).toContain('## Your notes\n\nKeep **my** notes &amp; &lt;details&gt;.');
-    expect(markdown).toContain('## AI notes\n\n## Decision\nShip 東京.');
+    expect(markdown).not.toContain('## Your notes');
+    expect(markdown).toContain('## Notes\n\n## Decision\nShip 東京.');
     expect(markdown).toContain('## Transcript\n\n> Transcript may be incomplete.\n\n[System audio · 00:12] Ship 東京 (v2) [soon].');
     expect(markdown).toContain('## Capture warnings\n\n- Microphone &lt;silent&gt; &amp; retry later.');
     expect(markdown).not.toContain('<script>');
   });
 
   it('exports an intentionally blank AI-note edit instead of the generated baseline', () => {
-    const markdown = meetingMarkdown({ ...meeting, editedEnrichedNotes: '' });
+    const markdown = meetingMarkdown({ ...meeting, notes: '' });
 
-    expect(aiNotes({ ...meeting, editedEnrichedNotes: '' })).toBe('');
-    expect(markdown).toContain('## AI notes\n\n_None saved._');
+    expect(meetingNotes({ ...meeting, notes: '' })).toBe('');
+    expect(markdown).toContain('## Notes\n\n_None saved._');
     expect(markdown).not.toContain('## Decision');
   });
 
@@ -96,8 +95,7 @@ describe('meetingMarkdown', () => {
       warnings: []
     });
 
-    expect(markdown).toContain('## Your notes\n\n_None saved._');
-    expect(markdown).toContain('## AI notes\n\n_None saved._');
+    expect(markdown).toContain('## Notes\n\n_None saved._');
     expect(markdown).toContain('## Transcript\n\n_None saved._');
     expect(markdown).toContain('## Capture warnings\n\n_None._');
   });
@@ -112,14 +110,6 @@ describe('meetingMarkdown', () => {
 });
 
 describe('workspace labels and transcript structure', () => {
-  it('names note ownership plainly', () => {
-    expect((['original', 'enhanced', 'transcript'] as const).map(meetingViewLabel)).toEqual([
-      'Your notes',
-      'AI notes',
-      'Transcript'
-    ]);
-  });
-
   it('orders turns chronologically and scopes identical speaker labels to each source chunk', () => {
     const turns = transcriptTurns([
       {
@@ -197,4 +187,21 @@ describe('workspace labels and transcript structure', () => {
     expect(transcriptParagraphs(text, 'decision. Review')).toEqual([text]);
     expect(legacyTranscriptParagraphs('Source tracks overlap in time.\n\nSaved words.')).toEqual(['Saved words.']);
   });
+});
+
+ it('uses one notes document for old recordings, drafts, and intentional blank edits', () => {
+  expect(meetingNotes(meeting)).toBe(`${meeting.enrichedNotes}\n\n${meeting.originalNotes}`);
+  expect(meetingNotes({ ...meeting, enrichedNotes: null })).toBe(meeting.originalNotes);
+  expect(meetingNotes({ ...meeting, enrichedNotes: '  ' })).toBe(meeting.originalNotes);
+  expect(meetingNotes({ ...meeting, enrichedNotes: null, notes: 'Draft edit' })).toBe('Draft edit');
+  expect(meetingNotes({ ...meeting, notes: '' })).toBe('');
+});
+
+it('keeps legacy manual additions visible without duplicate ownership sections', () => {
+  const legacy = { ...meeting, originalNotes: 'Call Joe Friday', enrichedNotes: '## Summary\nBudget review' };
+  expect(meetingNotes(legacy)).toBe('## Summary\nBudget review\n\nCall Joe Friday');
+  expect(meetingMarkdown(legacy)).toContain('Call Joe Friday');
+  expect(meetingNotes({ ...legacy, enrichedNotes: 'Call Joe Friday' })).toBe('Call Joe Friday');
+  expect(meetingNotes({ ...legacy, editedEnrichedNotes: '' })).toBe('Call Joe Friday');
+  expect(meetingNotes({ ...legacy, notes: 'Latest complete document' })).toBe('Latest complete document');
 });

@@ -253,7 +253,7 @@ fn transcription_upload_identifies_m4a_as_audio_mp4() {
 }
 
 #[test]
-fn folder_question_posts_sources_and_rejects_invented_citations() {
+fn folder_question_resolves_passage_ids_to_saved_text() {
     let mut first = session();
     first.id = "first-meeting".into();
     first.title = "Harbor review".into();
@@ -271,16 +271,8 @@ fn folder_question_posts_sources_and_rejects_invented_citations() {
                     "type": "output_text",
                     "text": serde_json::json!({
                         "answer": "The rent roll still needs review.",
-                        "citations": [
-                            {
-                                "session_id": "first-meeting",
-                                "excerpt": "Exact source sentence about the rent roll."
-                            },
-                            {
-                                "session_id": "made-up-meeting",
-                                "excerpt": "Invented evidence"
-                            }
-                        ]
+                        "supported": true,
+                        "source_ids": ["m0:transcript:0", "m0:transcript:0"]
                     }).to_string()
                 }]
             }]
@@ -318,9 +310,7 @@ fn meeting_questions_use_saved_ai_edits_instead_of_the_old_baseline() {
     let response = json_response(
         200,
         &json!({"status":"completed","output":[{"content":[{
-            "type":"output_text", "text":json!({"answer":"Wednesday.","citations":[{
-                "session_id":source.id,"excerpt":"My correction: the decision is Wednesday."
-            }]}).to_string()
+            "type":"output_text", "text":json!({"answer":"Wednesday.","supported":true,"source_ids":["m0:notes:0"]}).to_string()
         }]}]})
         .to_string(),
     );
@@ -351,10 +341,8 @@ fn folder_question_rejects_an_answer_with_only_invented_citations() {
                     "type": "output_text",
                     "text": serde_json::json!({
                         "answer": "Unsupported claim.",
-                        "citations": [{
-                            "session_id": "made-up-meeting",
-                            "excerpt": "Invented evidence"
-                        }]
+                        "supported": true,
+                        "source_ids": ["m0:transcript:0", "invented"]
                     }).to_string()
                 }]
             }]
@@ -384,7 +372,7 @@ fn folder_question_rejects_an_uncited_answer() {
                     "type": "output_text",
                     "text": serde_json::json!({
                         "answer": "Unsupported claim.",
-                        "citations": []
+                        "supported": true, "source_ids": []
                     }).to_string()
                 }]
             }]
@@ -506,10 +494,11 @@ fn meeting_question_includes_late_decisions_and_capture_warnings() {
         "{}\n{decision}",
         "Earlier discussion. ".repeat(600)
     ));
+    let full_transcript = source.transcript.clone().unwrap();
     source.warnings = vec!["Capture interrupted; coverage is incomplete.".into()];
     let response = json_response(200, &json!({
         "status": "completed", "output": [{ "content": [{ "type": "output_text", "text": json!({
-            "answer": "Postpone until Monday.", "citations": [{ "session_id": source.id, "excerpt": decision }]
+            "answer": "Postpone until Monday.", "supported": true, "source_ids": ["m0:transcript:10"]
         }).to_string() }] }]
     }).to_string());
     let (url, requests) = local_server(response);
@@ -525,7 +514,16 @@ fn meeting_question_includes_late_decisions_and_capture_warnings() {
         "late source material must reach the request"
     );
     assert!(text.contains("Capture interrupted; coverage is incomplete."));
-    assert_eq!(answer.unwrap().citations[0].excerpt, decision);
+    let context: Value = serde_json::from_str(text).unwrap();
+    let joined: String = context["passages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|source| source["id"].as_str().unwrap().starts_with("m0:transcript:"))
+        .map(|source| source["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(joined, full_transcript);
+    assert!(answer.unwrap().citations[0].excerpt.contains(decision));
 }
 
 #[test]
@@ -701,4 +699,95 @@ fn enrichment_validates_grounded_speaker_suggestions_and_topic_anchors() {
         source.original_notes,
         "rent roll is the issue NOTES_TOKEN_299"
     );
+}
+
+#[test]
+fn unavailable_answer_is_a_normal_response_without_invented_facts() {
+    let response = json_response(200, &json!({"status":"completed","output":[{"content":[{
+        "type":"output_text", "text":json!({"answer":"Untrusted unsupported claim.","supported":false,"source_ids":[]}).to_string()
+    }]}]}).to_string());
+    let (url, _) = local_server(response);
+    let answer = tauri::async_runtime::block_on(OpenAiClient::with_base_url(url).ask_meetings(
+        &[session()],
+        "What was the unmentioned phone number?",
+        "test-key",
+    ))
+    .unwrap();
+    assert!(answer.citations.is_empty());
+    assert_eq!(
+        answer.answer,
+        "The saved notes and transcript don’t contain enough information to answer that."
+    );
+}
+
+#[test]
+fn question_citations_keep_original_unicode_spacing_and_punctuation() {
+    let mut source = session();
+    source.transcript = Some("Renée:  “Ship 東京.”\n\nFriday — confirmed.".into());
+    let expected = source.transcript.clone().unwrap();
+    let response = json_response(200, &json!({"status":"completed","output":[{"content":[{
+        "type":"output_text", "text":json!({"answer":"A Friday launch was confirmed.","supported":true,"source_ids":["m0:transcript:0"]}).to_string()
+    }]}]}).to_string());
+    let (url, _) = local_server(response);
+    let answer = tauri::async_runtime::block_on(OpenAiClient::with_base_url(url).ask_meetings(
+        &[source],
+        "what was it about",
+        "test-key",
+    ))
+    .unwrap();
+    assert_eq!(answer.citations[0].excerpt, expected);
+}
+
+#[test]
+#[ignore = "uses paid OpenAI requests on synthetic text and the authorized login Keychain key"]
+fn live_synthetic_meeting_questions_with_openai() {
+    let credential = std::process::Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "com.dweng.meetingnotes",
+            "-a",
+            "openai-api-key",
+            "-w",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        credential.status.success(),
+        "Login Keychain requires manual access approval"
+    );
+    let key = String::from_utf8(credential.stdout).expect("Keychain key is UTF-8");
+    let mut source = session();
+    source.original_notes.clear();
+    source.transcript = Some("[SIMULATION] Maya and Alex reviewed a warehouse acquisition. The roof report is missing. They decided to postpone underwriting until Monday. Alex will request the roof report Friday.".into());
+    source.notes = Some("## Summary\nWarehouse acquisition review.\n\n## Decision\nUnderwriting postponed until Monday.\n\n## Next step\nAlex requests the roof report Friday.".into());
+    let client = OpenAiClient::new();
+    let started = std::time::Instant::now();
+    let answer = tauri::async_runtime::block_on(client.ask_meetings(
+        &[source.clone()],
+        "what was it about",
+        key.trim(),
+    ))
+    .unwrap();
+    assert!(!answer.citations.is_empty());
+    assert!(answer.answer.to_lowercase().contains("warehouse"));
+    for citation in &answer.citations {
+        assert!(
+            source.notes().contains(&citation.excerpt)
+                || source
+                    .transcript
+                    .as_ref()
+                    .unwrap()
+                    .contains(&citation.excerpt)
+        );
+    }
+    let unknown = tauri::async_runtime::block_on(client.ask_meetings(
+        &[source],
+        "What is Maya's mobile phone number?",
+        key.trim(),
+    ))
+    .unwrap();
+    assert!(unknown.citations.is_empty());
+    assert!(unknown.answer.contains("don’t contain enough information"));
+    println!("Synthetic text-only acceptance: broad summary with {} saved passages; unavailable fact handled normally; two requests in {:.1}s.", answer.citations.len(), started.elapsed().as_secs_f64());
 }

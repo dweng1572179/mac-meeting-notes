@@ -399,13 +399,8 @@ fn eligible_meetings(sessions: Vec<Session>, folder: Option<&str>) -> Vec<Sessio
 fn has_meeting_material(session: &Session) -> bool {
     [
         session.context.as_str(),
-        session.original_notes.as_str(),
+        session.notes().as_str(),
         session.transcript.as_deref().unwrap_or_default(),
-        session
-            .edited_enriched_notes
-            .as_deref()
-            .or(session.enriched_notes.as_deref())
-            .unwrap_or_default(),
     ]
     .into_iter()
     .any(|text| !text.trim().is_empty())
@@ -629,12 +624,13 @@ async fn process_session_with_key(
         ));
     }
     let session = remove_retained_audio(state, id)?;
+    let requested_notes = session.notes();
     let sections = state.openai.enrich(&session, api_key).await?;
     let suggestions = sections.suggestions.clone();
     let omitted_suggestions = sections.omitted_suggestions;
     let notes = sections_to_markdown(sections);
     update_processing(state, id, |session| {
-        session.enriched_notes = Some(notes);
+        session.update_enriched_notes(notes, &requested_notes);
         session.ai_suggestions = Some(suggestions);
         let notice = "Some AI suggestions lacked matching source evidence and were omitted. Your notes and verified suggestions were kept.";
         session.warnings.retain(|warning| warning != notice);
@@ -1085,15 +1081,16 @@ pub fn transcript_deleted(mut session: Session) -> AppResult<Session> {
     }
     session.transcript = None;
     session.transcription.clear();
-    session.enriched_notes = None;
+    session.notes = Some(session.notes());
     session.edited_enriched_notes = None;
+    session.enriched_notes = None;
     session.ai_suggestions = None;
     session.dismissed_suggestions.clear();
     session.capture_segments.clear();
     session.live_transcription_error = None;
     if session.audio_path.is_some() || session.microphone_audio_path.is_some() {
         session.status = SessionStatus::Failed;
-        session.error = Some(AppError::new("transcript_deleted", "Transcript deleted. Your original notes and retained audio were kept. Retry will transcribe the remaining audio again."));
+        session.error = Some(AppError::new("transcript_deleted", "Transcript deleted. Your notes and retained audio were kept. Retry will transcribe the remaining audio again."));
     } else {
         session.capture_health = None;
         session.segmented_capture = false;
@@ -1429,6 +1426,7 @@ mod tests {
             attendees: Vec::new(),
             folder: String::new(),
             original_notes: "rent roll".into(),
+            notes: None,
         }
     }
 
