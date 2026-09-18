@@ -1,15 +1,6 @@
 use super::*;
 
 #[tauri::command]
-pub fn save_ai_notes(
-    state: State<'_, AppState>,
-    id: String,
-    notes: Option<String>,
-) -> AppResult<Session> {
-    save_ai_notes_state(&state, &id, notes)
-}
-
-#[tauri::command]
 pub fn apply_suggestion(
     state: State<'_, AppState>,
     id: String,
@@ -27,26 +18,6 @@ pub fn refresh_insights(
 ) -> AppResult<Session> {
     let session = prepare_refresh(&state, &id)?;
     super::spawn_processing(app, id);
-    Ok(session)
-}
-
-fn save_ai_notes_state(state: &AppState, id: &str, notes: Option<String>) -> AppResult<Session> {
-    if notes
-        .as_ref()
-        .is_some_and(|value| value.len() > 4 * 1024 * 1024)
-    {
-        return Err(AppError::new(
-            "invalid_ai_notes",
-            "AI notes must be at most 4 MiB",
-        ));
-    }
-    let _guard = lock_sessions(state)?;
-    let mut session = state.store.get(id)?;
-    if session.enriched_notes.is_none() {
-        return Err(invalid_status("Generate AI notes before editing them"));
-    }
-    session.edited_enriched_notes = notes;
-    state.store.save(&session)?;
     Ok(session)
 }
 
@@ -230,27 +201,6 @@ mod tests {
     }
 
     #[test]
-    fn ai_note_edits_and_restore_never_change_either_baseline() {
-        let fixture = Fixture::new();
-        let saved = save_ai_notes_state(&fixture.state, &fixture.id, Some(String::new())).unwrap();
-        assert_eq!(saved.edited_enriched_notes, Some(String::new()));
-        assert_eq!(fixture.saved(), saved);
-        assert_eq!(saved.original_notes, "My untouched notes");
-        assert_eq!(saved.enriched_notes.as_deref(), Some("AI baseline"));
-        assert_eq!(
-            save_ai_notes_state(&fixture.state, &fixture.id, None)
-                .unwrap()
-                .edited_enriched_notes,
-            None
-        );
-        let mut original = fixture.saved();
-        original.enriched_notes = None;
-        fixture.state.store.save(&original).unwrap();
-        assert!(save_ai_notes_state(&fixture.state, &fixture.id, Some("edit".into())).is_err());
-        assert_eq!(fixture.saved(), original);
-    }
-
-    #[test]
     fn selected_suggestion_changes_only_that_manual_field_and_persists_dismissal() {
         let fixture = Fixture::new();
         let saved = apply_suggestion_state(&fixture.state, &fixture.id, "title", "apply").unwrap();
@@ -333,16 +283,9 @@ mod tests {
     }
 
     #[test]
-    fn oversized_edits_and_suggestions_leave_previous_values_intact() {
+    fn oversized_suggestions_leave_previous_values_intact() {
         let fixture = Fixture::new();
         let original = fixture.saved();
-        assert!(save_ai_notes_state(
-            &fixture.state,
-            &fixture.id,
-            Some("x".repeat(4 * 1024 * 1024 + 1))
-        )
-        .is_err());
-        assert_eq!(fixture.saved(), original);
         let mut invalid = original;
         invalid
             .ai_suggestions

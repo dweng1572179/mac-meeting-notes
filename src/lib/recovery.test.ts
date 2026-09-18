@@ -41,7 +41,7 @@ describe('error recovery', () => {
   });
 
   it('distinguishes writing notes from transcription progress', () => {
-    expect(processingLabel(failed({ transcript: 'Saved words' }))).toBe('Writing AI notes…');
+    expect(processingLabel(failed({ transcript: 'Saved words' }))).toBe('Writing notes…');
     expect(processingLabel(failed({ transcription: [{ source: 'system', chunks: [
       { startSeconds: 0, durationSeconds: 300, transcript: 'Saved' },
       { startSeconds: 300, durationSeconds: 20, transcript: null }

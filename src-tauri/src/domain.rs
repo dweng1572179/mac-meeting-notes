@@ -71,6 +71,8 @@ pub struct UpdateSessionInput {
     pub attendees: Vec<String>,
     pub folder: String,
     pub original_notes: String,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -84,6 +86,8 @@ pub struct Session {
     pub attendees: Vec<String>,
     #[serde(default)]
     pub folder: String,
+    #[serde(default)]
+    pub notes: Option<String>,
     pub original_notes: String,
     pub transcript: Option<String>,
     pub enriched_notes: Option<String>,
@@ -213,6 +217,7 @@ impl Session {
             attendees: input.attendees,
             folder: String::new(),
             original_notes: String::new(),
+            notes: None,
             transcript: None,
             enriched_notes: None,
             status: SessionStatus::Draft,
@@ -232,12 +237,60 @@ impl Session {
         }
     }
 
+    pub fn notes(&self) -> String {
+        if let Some(notes) = &self.notes {
+            return notes.clone();
+        }
+        let summary = self
+            .edited_enriched_notes
+            .as_deref()
+            .or(self.enriched_notes.as_deref())
+            .unwrap_or_default();
+        let original = self.original_notes.trim();
+        if summary.trim().is_empty() {
+            return self.original_notes.clone();
+        }
+        // Older versions kept manual notes separately; never hide text absent from their summary.
+        if !original.is_empty() && !summary.contains(original) {
+            format!("{summary}\n\n{}", self.original_notes)
+        } else {
+            summary.to_owned()
+        }
+    }
+
+    pub fn update_enriched_notes(&mut self, notes: String, source_notes: &str) {
+        if notes.trim().is_empty() {
+            return;
+        }
+        // A response must never replace edits made while its request was in flight.
+        let current = self.notes();
+        self.notes = Some(if current == source_notes {
+            notes.clone()
+        } else {
+            current
+        });
+        self.enriched_notes = Some(notes);
+    }
+
     pub fn apply(&mut self, input: UpdateSessionInput) -> AppResult<()> {
         if input.id != self.id {
             return Err(AppError::new(
                 "session_id_mismatch",
                 "Session ID does not match",
             ));
+        }
+        if input
+            .notes
+            .as_ref()
+            .is_some_and(|notes| notes.len() > 4 * 1024 * 1024)
+        {
+            return Err(AppError::new(
+                "invalid_notes",
+                "Notes must be at most 4 MiB",
+            ));
+        }
+        if let Some(notes) = input.notes {
+            self.notes = Some(notes);
         }
         self.title = input.title;
         self.context = input.context;
@@ -455,7 +508,7 @@ pub fn meeting_sources(session: &Session) -> Vec<MeetingSource> {
     let mut sources: Vec<_> = [
         ("manual-title", session.title.clone()),
         ("manual-context", session.context.clone()),
-        ("manual-notes", session.original_notes.clone()),
+        ("manual-notes", session.notes()),
         ("manual-attendees", session.attendees.join(", ")),
     ]
     .into_iter()

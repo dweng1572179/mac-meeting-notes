@@ -193,3 +193,18 @@ The public DMG is 6,148,357 bytes with SHA-256 `c0ad31a96af20f3d482f8a41eb888ca8
 Both existing meeting files remained byte-for-byte unchanged. Build caches, verification browser/server, synthetic harness, screenshots, mount, and rollback bundle were cleaned. One verified DMG remains in Downloads.
 
 The installed window launched, but the native UI check is pending the user's macOS Keychain approval. A targeted process sample confirmed bootstrap waiting in `SecKeychainFindGenericPassword`; inspection timed out. Browser UI verification passed as recorded above, but native UI verification is not marked passed. No credentials or Keychain access settings were changed by the agent.
+
+
+## v0.4.2 unified notes and grounded questions — 2026-09-17
+
+The empty Your notes view was a separate editor for manual notes, while the useful summary lived in AI notes. There is now one Notes document and one autosave path. An optional canonical notes field leaves legacy fields intact. On read, older summaries retain manual text that is not already present verbatim; this is a lossless compatibility view, not a data rewrite. An intentional canonical blank stays blank. Transcript deletion retains the visible document.
+
+Independent review found two migration/timing defects before release: legacy manual text could be hidden, and a queued metadata save could replay acknowledged note text over a newly generated result. Legacy merge checks and note-revision-aware autosave fix these paths. The reviewer verified both fixes with no remaining blocker. Generation also compares the requested document against the current saved document before replacing it.
+
+The previous question contract allowed no-citation unavailable answers while its validator rejected all such responses. It also depended on the model copying exact excerpts. The replacement uses stable passage IDs, resolves source text locally from the same request snapshot, rejects unknown/uncited supported answers, deduplicates citations, and provides a fixed no-information answer when unsupported. Full source coverage remains bounded and never silently truncated. Exact passages establish source provenance; they do not prove every model inference correct.
+
+Local checks passed the full Rust suite and focused lifecycle/store/API contracts, including Unicode preservation, late decisions, no-answer behavior, intentional blank notes, legacy manual additions, deletion retention, oversize rejection, and in-flight edits. Frontend checks cover the queued metadata race and unified export/search selection. Browser checks verified existing summaries, edit → navigate → reopen with exact Unicode text, explicit blank edits, and desktop/840px layouts without ownership tabs or horizontal overflow.
+
+The opt-in `live_synthetic_meeting_questions_with_openai` acceptance passed two text-only requests in 3.6 seconds: “what was it about” returned a warehouse review summary with two exact saved passages; an unmentioned phone number produced the normal no-information answer. It used only synthetic text and the already-authorized login Keychain credential, never a saved user recording. No audio was recorded or retranscribed.
+
+Final local verification passed 56 frontend/API tests, zero Svelte errors or warnings, the production frontend build, all-target Clippy with warnings denied, Rust formatting, and diff whitespace checks. The full Rust suite passed with paid tests excluded; the synthetic question check passed separately as recorded above. Release and installation results are recorded after artifact verification.

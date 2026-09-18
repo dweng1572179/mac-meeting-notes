@@ -128,6 +128,7 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
       attendees: input.attendees,
       folder: '',
       originalNotes: '',
+      notes: null,
       enrichedNotes: null,
       transcript: null,
       audioPath: null,
@@ -151,18 +152,12 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
 
 export async function saveSession(input: UpdateSessionInput): Promise<Session> {
   if (!isNative()) {
-    previewSession = { ...(previewSession ?? previewState()), ...input };
+    const { notes, ...metadata } = input;
+    previewSession = { ...(previewSession ?? previewState()), ...metadata };
+    if (notes !== undefined) previewSession.notes = notes;
     return previewSession;
   }
   return invoke<Session>('save_session', { input });
-}
-
-export async function saveAiNotes(id: string, notes: string | null): Promise<Session> {
-  if (!isNative()) {
-    previewSession = { ...(previewSession ?? previewState()), id, editedEnrichedNotes: notes };
-    return previewSession;
-  }
-  return invoke<Session>('save_ai_notes', { id, notes });
 }
 
 export async function applySuggestion(id: string, key: string, action: 'apply' | 'dismiss'): Promise<Session> {
@@ -240,11 +235,13 @@ export async function deleteSession(id: string): Promise<void> {
 
 export async function deleteTranscript(id: string): Promise<Session> {
   if (!isNative()) {
+    const source = previewSession ?? previewState();
     previewSession = {
-      ...(previewSession ?? previewState()),
+      ...source,
       id,
       transcript: null,
       enrichedNotes: null,
+      notes: source.notes ?? [source.editedEnrichedNotes ?? source.enrichedNotes, source.originalNotes].filter(Boolean).join("\n\n"),
       editedEnrichedNotes: null,
       aiSuggestions: null,
       dismissedSuggestions: [],

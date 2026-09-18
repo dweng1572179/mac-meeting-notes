@@ -1,58 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { dirtyAiNotesDraft, flushMeetingDrafts, metadataAfterSuggestion, nextMeetingView } from './MeetingEditor.svelte';
+import { metadataAfterSuggestion } from './MeetingEditor.svelte';
 import { captureErrorMessage, elapsedRecordingSeconds } from './RecordingDock.svelte';
-
-describe('nextMeetingView', () => {
-  it('preserves Original when it was used during processing', () => {
-    expect(nextMeetingView('original', 'processing', 'complete', true)).toBe('original');
-  });
-
-  it('reveals Enhanced after untouched processing completes', () => {
-    expect(nextMeetingView('original', 'processing', 'complete', false)).toBe('enhanced');
-  });
-
-  it('keeps the transcript visible when processing finishes', () => {
-    expect(nextMeetingView('transcript', 'processing', 'complete', false)).toBe('transcript');
-  });
-});
-
-describe('dirtyAiNotesDraft', () => {
-  it('returns edited text, including an intentional blank, while the editor is open', () => {
-    expect(dirtyAiNotesDraft(true, 'Revised notes', 'Generated notes')).toBe('Revised notes');
-    expect(dirtyAiNotesDraft(true, '', 'Generated notes')).toBe('');
-  });
-
-  it('does not persist a closed or unchanged draft during navigation', () => {
-    expect(dirtyAiNotesDraft(false, 'Revised notes', 'Generated notes')).toBeUndefined();
-    expect(dirtyAiNotesDraft(true, 'Generated notes', 'Generated notes')).toBeUndefined();
-  });
-});
-
-describe('flushMeetingDrafts', () => {
-  it('waits for original notes before saving a dirty AI draft', async () => {
-    const events: string[] = [];
-    await flushMeetingDrafts(
-      async () => void events.push('original'),
-      () => 'AI draft',
-      async (draft) => void events.push(draft)
-    );
-    expect(events).toEqual(['original', 'AI draft']);
-  });
-
-  it('includes typing that occurs while the original notes are saving', async () => {
-    let draft = 'Earlier draft';
-    let saved = '';
-    await flushMeetingDrafts(async () => { await Promise.resolve(); draft = 'Latest typed draft'; },
-      () => draft, async (value) => { saved = value; });
-    expect(saved).toBe('Latest typed draft');
-  });
-
-  it('rejects when the AI draft cannot be saved so navigation stays blocked', async () => {
-    await expect(
-      flushMeetingDrafts(async () => {}, () => '', async () => { throw new Error('disk full'); })
-    ).rejects.toThrow('disk full');
-  });
-});
 
 it('merges a delayed suggestion response without replacing unrelated local metadata', () => {
   const current = { title: 'Typed title', context: 'New local context', folder: 'Local folder', attendees: 'Ari' };
@@ -115,4 +63,32 @@ describe('captureCoverage', () => {
       'Elapsed 2:25:34 · Captured: system 0:00, microphone 1:12:00'
     );
   });
+});
+
+it('does not replay acknowledged notes when queued metadata saves after generation', async () => {
+  const { unsavedNotesInput } = await import('./MeetingEditor.svelte');
+  const { createAutosave } = await import('./autosave');
+  let savedRevision = 0;
+  let document = 'Initial';
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const saved: import('./types').UpdateSessionInput[] = [];
+  const autosave = createAutosave<{ input: import('./types').UpdateSessionInput; revision: number }>(450, async ({ input, revision }) => {
+    const value = unsavedNotesInput(input, revision, savedRevision);
+    saved.push(value);
+    if (saved.length === 1) await blocked;
+    if (value.notes !== undefined) { document = value.notes; savedRevision = revision; }
+    if (saved.length === 1) document = 'Generated from latest notes';
+  });
+  const input = { id: 'one', title: 'Before', context: '', attendees: [], folder: '', originalNotes: '', notes: 'Typed notes' };
+  autosave.schedule({ input, revision: 1 });
+  const flushed = autosave.flush();
+  await Promise.resolve();
+  autosave.schedule({ input: { ...input, title: 'After' }, revision: 1 });
+  release();
+  await flushed;
+  expect(document).toBe('Generated from latest notes');
+  expect(saved[1].title).toBe('After');
+  expect(saved[1].notes).toBeUndefined();
+  expect(unsavedNotesInput({ ...input, notes: '' }, 2, savedRevision).notes).toBe('');
 });

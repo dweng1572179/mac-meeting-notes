@@ -29,6 +29,7 @@ export type Session = {
   context: string;
   attendees: string[];
   folder: string;
+  notes?: string | null;
   originalNotes: string;
   transcript: string | null;
   enrichedNotes: string | null;
@@ -57,7 +58,7 @@ export type CreateSessionInput = Pick<Session, 'title' | 'context' | 'attendees'
 export type UpdateSessionInput = Pick<
   Session,
   'id' | 'title' | 'context' | 'attendees' | 'folder' | 'originalNotes'
->;
+> & { notes?: string };
 
 export type RecordingInfo = { sessionId: string; startedAt: string };
 

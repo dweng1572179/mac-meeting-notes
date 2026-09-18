@@ -252,6 +252,7 @@ fn update_with_different_id_leaves_session_unchanged() {
         attendees: vec!["Changed attendee".into()],
         folder: "Changed folder".into(),
         original_notes: "Changed notes".into(),
+        notes: None,
     });
 
     assert!(result.is_err());
@@ -666,4 +667,71 @@ fn product_settings_roundtrip_validation_and_old_session_default() {
         assert_eq!(std::fs::read_to_string(victim).unwrap(), "untouched");
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn one_notes_document_preserves_edits_and_ignores_late_generation() {
+    let mut session = Session::new(CreateSessionInput {
+        title: "Test".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    session.original_notes = "Legacy typed notes".into();
+    assert_eq!(session.notes(), "Legacy typed notes");
+    session.update_enriched_notes("First summary".into(), "Legacy typed notes");
+    assert_eq!(session.notes(), "First summary");
+    session.notes = Some("Latest edit".into());
+    session.update_enriched_notes("Stale refresh".into(), "First summary");
+    assert_eq!(session.notes(), "Latest edit");
+    session.update_enriched_notes("Updated from latest edit".into(), "Latest edit");
+    assert_eq!(session.notes(), "Updated from latest edit");
+    session.notes = Some(String::new());
+    assert_eq!(session.notes(), "");
+    assert_eq!(session.original_notes, "Legacy typed notes");
+}
+
+#[test]
+fn unified_note_saves_preserve_empty_edits_and_reject_oversize_before_mutation() {
+    let mut session = Session::new(CreateSessionInput {
+        title: "Test".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    session.original_notes = "Original source".into();
+    session.enriched_notes = Some("Saved summary".into());
+    let mut input = UpdateSessionInput {
+        id: session.id.clone(),
+        title: session.title.clone(),
+        context: String::new(),
+        attendees: vec![],
+        folder: String::new(),
+        original_notes: session.original_notes.clone(),
+        notes: Some(String::new()),
+    };
+    session.apply(input.clone()).unwrap();
+    assert_eq!(session.notes(), "");
+    assert_eq!(session.original_notes, "Original source");
+    let before = session.clone();
+    input.notes = Some("x".repeat(4 * 1024 * 1024 + 1));
+    input.title = "Should not save".into();
+    assert!(session.apply(input).is_err());
+    assert_eq!(session, before);
+}
+
+#[test]
+fn legacy_manual_notes_remain_in_the_unified_document_until_explicitly_edited() {
+    let mut session = Session::new(CreateSessionInput {
+        title: "Test".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    session.original_notes = "Call Joe Friday".into();
+    session.enriched_notes = Some("Budget review".into());
+    assert_eq!(session.notes(), "Budget review\n\nCall Joe Friday");
+    session.enriched_notes = Some("Call Joe Friday".into());
+    assert_eq!(session.notes(), "Call Joe Friday");
+    session.edited_enriched_notes = Some(String::new());
+    assert_eq!(session.notes(), "Call Joe Friday");
+    session.notes = Some(String::new());
+    assert_eq!(session.notes(), "");
 }
