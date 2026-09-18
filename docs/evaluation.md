@@ -208,3 +208,14 @@ Local checks passed the full Rust suite and focused lifecycle/store/API contract
 The opt-in `live_synthetic_meeting_questions_with_openai` acceptance passed two text-only requests in 3.6 seconds: “what was it about” returned a warehouse review summary with two exact saved passages; an unmentioned phone number produced the normal no-information answer. It used only synthetic text and the already-authorized login Keychain credential, never a saved user recording. No audio was recorded or retranscribed.
 
 Final local verification passed 56 frontend/API tests, zero Svelte errors or warnings, the production frontend build, all-target Clippy with warnings denied, Rust formatting, and diff whitespace checks. The full Rust suite passed with paid tests excluded; the synthetic question check passed separately as recorded above. Release and installation results are recorded after artifact verification.
+
+
+### v0.4.2 release and installed verification
+
+[Release run 35291401937](https://github.com/dweng1572179/mac-meeting-notes/actions/runs/35291401937) passed the frontend checks, full Rust suite, Clippy, optimized app build, packaging regression, and mounted signature verification. [v0.4.2](https://github.com/dweng1572179/mac-meeting-notes/releases/tag/v0.4.2) points to `c7940bdb916fbe7d96a1dfd6df13a64b7c8df8e6`.
+
+The public DMG is 6,167,780 bytes; SHA-256 `babaca1553d4f8bc2872f056a1e2f54e17bbb92a6a93b1ef9996967ae8d77030` matched GitHub. Its read-only mounted app passed version, strict deep signature, and audio-input entitlement checks. Both saved sessions were complete immediately before installation. The running app returned to the library to flush edits, quit normally, and was replaced only after the process exited and session states were rechecked. Every installed bundle file matched the public artifact; executable SHA-256 is `329a596f3c0bb9375d672e43d52bc0ae451c266b939c7156cd1388e617e56bdd`.
+
+Native UI verification passed: the existing TEST meeting opened under Notes with Edit notes and Transcript controls, without the old ownership tabs. The exact reported question, “what was it about”, succeeded in the installed app and displayed nine locally resolved saved-source citations. This additional native check used TEST's saved text; it did not record audio, retranscribe either meeting, or open the protected lecture. Both existing meeting JSON files remained byte-for-byte unchanged after the question.
+
+Verification browser/server, local build caches, temporary installer/mount, and rollback bundle were cleaned. The latest verified DMG remains in Downloads, and the installed app remains open on TEST with its successful answer.
