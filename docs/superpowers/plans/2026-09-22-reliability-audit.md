@@ -13,7 +13,7 @@
 - [x] Capture: keep accumulated missing-duration warnings visible after callbacks resume. Do not claim device switching or wall-clock alignment is solved.
 - [x] Notes quality: preserve concrete details and uncertainty, avoid business decisions/actions for conversations that contain none. Run a paid synthetic bilingual evaluation within a small bounded budget.
 - [x] Verify Rust/frontend regressions and review; document both proven fixes and remaining physical-device/recognition limits.
-- [ ] Release and install only after checking recording inactivity again.
+- [x] Release and install only after checking recording inactivity again.
 
 Review focus: transient errors during recording and stopping; malformed/null metadata with valid required text; pending poisoned section beside healthy sections; focused clean versus dirty notes; bilingual facts, negations, changed decisions and genuinely absent action items.
 
