@@ -114,13 +114,13 @@ describe('workspace labels and transcript structure', () => {
     const turns = transcriptTurns([
       {
         source: 'microphone',
-        chunks: [{ startSeconds: 60, durationSeconds: 30, transcript: 'Later', segmentIndex: 2, segments: [
+        chunks: [{ startSeconds: 60, durationSeconds: 30, transcript: 'Later words.', segmentIndex: 2, segments: [
           { id: 'turn-1', speaker: 'A', startSeconds: 2, endSeconds: 5, text: 'Later words.' }
         ] }]
       },
       {
         source: 'system',
-        chunks: [{ startSeconds: 0, durationSeconds: 30, transcript: 'Earlier', segmentIndex: 0, segments: [
+        chunks: [{ startSeconds: 0, durationSeconds: 30, transcript: 'Earlier words.', segmentIndex: 0, segments: [
           { id: 'turn-1', speaker: 'A', startSeconds: 1, endSeconds: 4, text: 'Earlier words.' }
         ] }]
       }
@@ -146,6 +146,36 @@ describe('workspace labels and transcript structure', () => {
     expect(turns.map(({ id, speakerKey, text }) => ({ id, speakerKey, text }))).toEqual([
       { id: 'microphone:segment-0:offset-0:text', speakerKey: null, text: 'Plain opening.' },
       { id: 'microphone:segment-1:offset-10000:speaker-turn', speakerKey: 'microphone:segment-1:offset-10000:B', text: 'Spoken turn.' }
+    ]);
+  });
+
+  it('keeps canonical words searchable without speaker attribution when segment text disagrees', () => {
+    const canonical = 'We discussed the budget. Final decision: do not sign.';
+    const turns = transcriptTurns([{ source: 'system', chunks: [{
+      startSeconds: 60, durationSeconds: 30, segmentIndex: 1, transcript: canonical,
+      segments: [{ id: 's0', speaker: 'A', startSeconds: 1, endSeconds: 5, text: 'We discussed the budget. Sign.' }]
+    }] }]);
+
+    expect(turns).toEqual([{
+      id: 'system:segment-1:offset-60000:text', speakerKey: null, speaker: null,
+      sectionLabel: 'Part 2', source: 'system', startSeconds: 60, endSeconds: 90,
+      text: canonical
+    }]);
+    expect(turns.flatMap((turn) => literalHighlights(turn.text, 'do not sign')).filter((part) => part.match))
+      .toEqual([{ text: 'do not sign', match: true }]);
+  });
+
+  it('retains speaker turns when only whitespace differs from canonical words', () => {
+    const turns = transcriptTurns([{ source: 'microphone', chunks: [{
+      startSeconds: 0, durationSeconds: 10, transcript: '  First\u0085words.\tLater\nwords.  ',
+      segments: [
+        { id: 's0', speaker: 'A', startSeconds: 0, endSeconds: 2, text: 'First words.' },
+        { id: 's1', speaker: 'B', startSeconds: 3, endSeconds: 5, text: 'Later words.' }
+      ]
+    }] }]);
+
+    expect(turns.map(({ speaker, text }) => ({ speaker, text }))).toEqual([
+      { speaker: 'A', text: 'First words.' }, { speaker: 'B', text: 'Later words.' }
     ]);
   });
 

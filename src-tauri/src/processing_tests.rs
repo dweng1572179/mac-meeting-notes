@@ -164,6 +164,7 @@ fn finalized_section_is_checkpointed_before_recording_stops_without_enrichment()
     session.transcription = vec![SourceTranscript {
         source: AudioSource::System,
         chunks: vec![TranscriptChunk {
+            error: None,
             start_seconds: 0.0,
             duration_seconds: duration,
             transcript: None,
@@ -507,6 +508,7 @@ fn reopen_after_final_checkpoint_cleans_scratch_and_reports_silent_source() {
         .map(|source| SourceTranscript {
             source,
             chunks: vec![TranscriptChunk {
+                error: None,
                 segment_index: None,
                 segments: Vec::new(),
                 start_seconds: 0.0,
@@ -719,6 +721,7 @@ fn product_no_speech_retry_reopens_only_empty_checkpoints() {
         source: AudioSource::System,
         chunks: vec![
             TranscriptChunk {
+                error: None,
                 segment_index: None,
                 segments: Vec::new(),
                 start_seconds: 0.0,
@@ -726,6 +729,7 @@ fn product_no_speech_retry_reopens_only_empty_checkpoints() {
                 transcript: Some("kept".into()),
             },
             TranscriptChunk {
+                error: None,
                 segment_index: None,
                 segments: Vec::new(),
                 start_seconds: 1.0,
@@ -787,6 +791,7 @@ fn product_no_speech_retry_adopts_settings_and_clears_resolved_warning() {
     session.transcription = vec![SourceTranscript {
         source: AudioSource::System,
         chunks: vec![TranscriptChunk {
+            error: None,
             segment_index: None,
             segments: Vec::new(),
             start_seconds: 0.0,
@@ -866,6 +871,7 @@ fn invalid_speaker_timing_does_not_block_either_processing_path() {
                 session.transcription = vec![SourceTranscript {
                     source: AudioSource::System,
                     chunks: vec![TranscriptChunk {
+                        error: None,
                         segment_index: Some(0),
                         start_seconds: 0.0,
                         duration_seconds: duration,

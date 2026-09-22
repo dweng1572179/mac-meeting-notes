@@ -79,11 +79,11 @@ The verified `Meeting-Notes.dmg` is written in the repository root. Packaging us
 
 ## Focused evaluation
 
-The repeatable labeled simulation and expected results are in [`docs/evaluation.md`](docs/evaluation.md).
+The repeatable labeled simulation and expected results are in [`docs/evaluation.md`](docs/evaluation.md). The [September 22 reliability audit](docs/reliability-audit-2026-09-22.md) documents repeated failure causes, v0.4.4 fixes, verified cost estimates and remaining limits.
 
 ## Storage
 
-Meeting metadata, your notes, raw transcripts, generated AI notes, your AI-note edits, suggestions, and transcription progress are stored locally in the app's macOS application-data directory. The generated AI-note baseline and your edited version are separate.
+Meeting metadata, your notes, raw transcripts, generated AI notes, your AI-note edits, suggestions, and transcription progress are stored locally in the app's macOS application-data directory. The interface presents one editable Notes document; the previous generated baseline is retained internally to preserve edits safely.
 
 New recordings use numbered source sections. A finalized section becomes eligible for transcription only after capture closes and syncs its file. Transcription is atomically saved before successfully checkpointed speech audio can be deleted; silent, failed, or unreadable audio may remain for recovery. Startup/retry can recover unregistered section files and retains unreadable tails with warnings. Legacy whole-file recordings keep their retry path.
 

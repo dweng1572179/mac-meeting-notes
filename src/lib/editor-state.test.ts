@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { metadataAfterSuggestion } from './MeetingEditor.svelte';
+import { metadataAfterSuggestion, notesAfterSessionChange, unsavedNotesInput } from './MeetingEditor.svelte';
 import { captureErrorMessage, elapsedRecordingSeconds } from './RecordingDock.svelte';
+
+it('uses generated notes for the next edit when the open editor has no unsaved draft', () => {
+  const notes = notesAfterSessionChange('Earlier draft', 'Generated decision: wait.', false);
+  const input = { id: 'one', title: '', context: '', attendees: [], folder: '', originalNotes: '', notes: `${notes}\nConfirm Friday.` };
+  expect(unsavedNotesInput(input, 2, 1).notes).toBe('Generated decision: wait.\nConfirm Friday.');
+});
+
+it('preserves an unsaved draft, including an intentional blank, when server notes change', () => {
+  expect(notesAfterSessionChange('My unsaved correction', 'Generated notes', true)).toBe('My unsaved correction');
+  expect(notesAfterSessionChange('', 'Generated notes', true)).toBe('');
+});
 
 it('merges a delayed suggestion response without replacing unrelated local metadata', () => {
   const current = { title: 'Typed title', context: 'New local context', folder: 'Local folder', attendees: 'Ari' };

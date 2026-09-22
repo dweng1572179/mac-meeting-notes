@@ -289,12 +289,17 @@ fn speaker_turn_keys_separate_uploads_sources_and_adaptive_splits() {
     assert_eq!(turns.len(), 3);
     assert_eq!(turns[0].id, "microphone:segment-1:offset-60000:0");
     assert_eq!(turns[1].id, "system:segment-1:offset-60000:0");
-    assert_eq!(turns[2].id, "system:segment-1:offset-90000:0");
+    assert_eq!(turns[2].id, "system:segment-1:offset-90000:text");
     assert_ne!(turns[1].speaker_key, turns[2].speaker_key);
-    assert_eq!(turns[2].start_seconds, 90.1);
+    assert_eq!(turns[2].start_seconds, 90.0);
+    assert_eq!(turns[2].speaker_key, None);
+    assert_eq!(turns[2].text, "Later words EXTRA");
+    assert!(!meeting_sources(&meeting)
+        .iter()
+        .any(|source| source.text == "Later words"));
     assert!(meeting_sources(&meeting)
         .iter()
-        .any(|source| source.id == "raw:system:segment-1:offset-90000"
+        .any(|source| source.id == "system:segment-1:offset-90000:text"
             && source.text.ends_with("EXTRA")));
 }
 

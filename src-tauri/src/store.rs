@@ -375,6 +375,9 @@ fn validate_transcription(session: &Session) -> AppResult<()> {
             } else if session.segmented_capture {
                 return Err(invalid());
             }
+            if chunk.error.is_some() && chunk.transcript.is_some() {
+                return Err(invalid());
+            }
             if !chunk.segments.is_empty() {
                 if chunk.transcript.is_none() {
                     return Err(invalid());

@@ -29,6 +29,25 @@ fn transcription_rejects_output_limit_instead_of_saving_a_truncated_transcript()
 }
 
 #[test]
+fn broken_success_body_is_a_network_failure_and_missing_words_are_not_silence() {
+    let path = std::env::temp_dir().join(format!("body-error-{}.m4a", uuid::Uuid::new_v4()));
+    std::fs::write(&path, [0, 0, 0, 9, b'm', b'd', b'a', b't', 1]).unwrap();
+    for (response, expected) in [
+        ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{\"text\":", "openai_network"),
+        (json_response(200, r#"{"segments":[]}"#).as_str(), "openai"),
+        (json_response(200, r#"{"text":null}"#).as_str(), "openai"),
+    ] {
+        let (url, _) = local_server(response.to_owned());
+        let error = tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url(url).transcribe(&path, "test-key"),
+        ).unwrap_err();
+        assert_eq!(error.code, expected);
+        assert!(path.exists());
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn oversized_upload_is_rejected_locally_and_kept() {
     let path =
         std::env::temp_dir().join(format!("meeting-notes-large-{}.m4a", uuid::Uuid::new_v4()));
@@ -615,6 +634,11 @@ fn diarization_keeps_words_when_speaker_metadata_is_invalid() {
     source.transcription_settings.model = "gpt-4o-transcribe-diarize".into();
     for segments in [
         json!([]),
+        json!(null),
+        json!({"invalid":"metadata"}),
+        json!([{"id":"s0","speaker":null,"start":0.0,"end":2.0,"text":"Words"}]),
+        json!([{"id":"s0","speaker":"A","start":"0","end":2.0,"text":"Words"}]),
+        json!([{"id":"s0","speaker":"A","start":0.0,"end":2.0}]),
         json!([{"id":"s0","speaker":"A","start":2.0,"end":2.0,"text":"Words"}]),
         json!([{"id":"s0","speaker":"A","start":-1.0,"end":2.0,"text":"Words"}]),
         json!([{"id":"s0","speaker":"","start":0.0,"end":2.0,"text":"Words"}]),
@@ -633,7 +657,7 @@ fn diarization_keeps_words_when_speaker_metadata_is_invalid() {
         assert!(result.segments.is_empty());
         assert!(path.exists());
     }
-    for duration in [json!(null), json!(-1.0)] {
+    for duration in [json!(null), json!(-1.0), json!("4.0"), json!({})] {
         let (url, _) = local_server(json_response(
             200,
             &json!({
@@ -823,4 +847,45 @@ fn live_synthetic_meeting_questions_with_openai() {
     assert!(unknown.citations.is_empty());
     assert!(unknown.answer.contains("don’t contain enough information"));
     println!("Synthetic text-only acceptance: broad summary with {} saved passages; unavailable fact handled normally; two requests in {:.1}s.", answer.citations.len(), started.elapsed().as_secs_f64());
+}
+
+#[test]
+fn generated_notes_are_not_recycled_as_independent_source_evidence() {
+    let mut source = session();
+    source.enriched_notes = Some("Unsupported generated conclusion".into());
+    source.notes = source.enriched_notes.clone();
+    let request = build_enrichment_request(&source);
+    let input = request["input"][0]["content"][0]["text"].as_str().unwrap();
+    assert!(!input.contains("Unsupported generated conclusion"));
+    assert!(
+        input.contains("NOTES_TOKEN_299"),
+        "original typed notes remain evidence"
+    );
+    source.notes = Some("Human correction and emphasis".into());
+    let request = build_enrichment_request(&source);
+    assert!(request["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Human correction and emphasis"));
+}
+
+#[test]
+fn enrichment_and_evidence_validation_use_the_same_original_notes() {
+    let mut source = session();
+    source.original_notes = "Typed emphasis".into();
+    source.enriched_notes = Some("AI baseline".into());
+    source.notes = source.enriched_notes.clone();
+    for (excerpt, accepted) in [("Typed emphasis", true), ("AI baseline", false)] {
+        let sections = json!({"summary":["Saved notes"],"key_points":[],"decisions":[],"action_items":[],"suggestions":{
+            "title":{"value":"Topic","evidence":[{"sourceId":"manual-notes","excerpt":excerpt}]},
+            "context":null,"category":null,"participants":[],"topics":[]
+        }});
+        let (url, _) = local_server(json_response(200, &json!({"status":"completed","output":[{"content":[{"type":"output_text","text":sections.to_string()}]}]}).to_string()));
+        let result = tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url(url).enrich(&source, "test-only"),
+        )
+        .unwrap();
+        assert_eq!(result.suggestions.title.is_some(), accepted);
+        assert_eq!(result.omitted_suggestions, !accepted);
+    }
 }

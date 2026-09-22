@@ -3,6 +3,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -470,50 +471,21 @@ fn spawn_processing(app: AppHandle, id: String) {
         let key = ApiKeyStore::load().and_then(|key| {
             key.ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))
         });
-        let mut paused: Option<AppError> = None;
-        let result = loop {
-            let session = match load_session(&state, &id) {
-                Ok(session) => session,
-                Err(error) => break Err(error),
-            };
-            if !matches!(
-                session.status,
-                SessionStatus::Recording | SessionStatus::Processing
-            ) {
-                break Ok(session);
-            }
-            if let Some(error) = paused.as_ref() {
-                if session.status != SessionStatus::Recording {
-                    break Err(error.clone());
-                }
-            } else {
-                let result = match &key {
-                    Ok(key) => tauri::async_runtime::block_on(process_session_with_key(
-                        &state,
-                        &id,
-                        key,
-                        |session| {
-                            let _ = app.emit(SESSION_UPDATED, session);
-                        },
-                    )),
-                    Err(error) => Err(error.clone()),
-                };
-                match result {
-                    Ok(session) if session.status != SessionStatus::Recording => break Ok(session),
-                    Ok(_) => {}
-                    Err(error) => {
-                        if matches!(load_session(&state, &id), Ok(session) if session.status == SessionStatus::Recording)
-                        {
-                            save_failure(&app, &id, error.clone());
-                            paused = Some(error);
-                        } else {
-                            break Err(error);
-                        }
-                    }
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(500));
+        let progress = |session| {
+            let _ = app.emit(SESSION_UPDATED, session);
         };
+        let result = run_processing_worker(
+            &state,
+            &id,
+            || match &key {
+                Ok(key) => tauri::async_runtime::block_on(process_session_with_key(
+                    &state, &id, key, &progress,
+                )),
+                Err(error) => Err(error.clone()),
+            },
+            &progress,
+            std::thread::sleep,
+        );
         let saved = match result {
             Ok(session) => Ok(session),
             Err(error) => persist_failure(&state, &id, error),
@@ -523,6 +495,89 @@ fn spawn_processing(app: AppHandle, id: String) {
             let _ = app.emit(SESSION_UPDATED, session);
         }
     });
+}
+
+fn run_processing_worker(
+    state: &AppState,
+    id: &str,
+    mut process: impl FnMut() -> AppResult<Session>,
+    progress: &impl Fn(Session),
+    mut wait: impl FnMut(Duration),
+) -> AppResult<Session> {
+    let poll = Duration::from_millis(500);
+    let mut paused: Option<AppError> = None;
+    let mut retry_after: Option<Duration> = None;
+    let mut retries = 0;
+    loop {
+        let session = load_session(state, id)?;
+        if !matches!(
+            session.status,
+            SessionStatus::Recording | SessionStatus::Processing
+        ) {
+            return Ok(session);
+        }
+        if let Some(error) = paused.as_ref() {
+            match retry_after {
+                Some(remaining) if !remaining.is_zero() => {
+                    let delay = remaining.min(poll);
+                    wait(delay);
+                    retry_after = Some(remaining - delay);
+                    continue;
+                }
+                None => {
+                    if session.status != SessionStatus::Recording {
+                        return Err(error.clone());
+                    }
+                    wait(poll);
+                    continue;
+                }
+                Some(_) => progress(update_processing(state, id, |session| {
+                    session.live_transcription_error = None;
+                })?),
+            }
+        }
+        match process() {
+            Ok(session) => {
+                retries = 0;
+                paused = None;
+                retry_after = None;
+                let finished = session.status != SessionStatus::Recording;
+                let session = if session.live_transcription_error.is_some() {
+                    let cleared = update_processing(state, id, |session| {
+                        session.live_transcription_error = None;
+                    })?;
+                    progress(cleared.clone());
+                    cleared
+                } else {
+                    session
+                };
+                if finished {
+                    return Ok(session);
+                }
+                wait(poll);
+            }
+            Err(error) => {
+                retry_after = if matches!(
+                    error.code.as_str(),
+                    "rate_limited" | "openai_server" | "openai_timeout" | "openai_network"
+                ) {
+                    [2, 4, 8]
+                        .get(retries)
+                        .map(|seconds| Duration::from_secs(*seconds))
+                } else {
+                    None
+                };
+                if retry_after.is_some() {
+                    retries += 1;
+                }
+                // Do not transition to Failed if Stop wins the race with a retryable error.
+                progress(update_processing(state, id, |session| {
+                    session.live_transcription_error = Some(error.clone());
+                })?);
+                paused = Some(error);
+            }
+        }
+    }
 }
 
 async fn process_session_with_key(
@@ -668,6 +723,7 @@ async fn transcribe_source(
         while start < duration {
             let length = (duration - start).min(300.0);
             chunks.push(TranscriptChunk {
+                error: None,
                 segment_index: None,
                 segments: Vec::new(),
                 start_seconds: start,
@@ -795,6 +851,7 @@ async fn transcribe_source(
                         index..=index,
                         [
                             TranscriptChunk {
+                                error: None,
                                 segment_index: None,
                                 segments: Vec::new(),
                                 start_seconds: start,
@@ -802,6 +859,7 @@ async fn transcribe_source(
                                 transcript: None,
                             },
                             TranscriptChunk {
+                                error: None,
                                 segment_index: None,
                                 segments: Vec::new(),
                                 start_seconds: start + length / 2.0,
@@ -996,6 +1054,18 @@ fn prepare_retry(state: &AppState, id: &str) -> AppResult<Session> {
 pub fn retry_start(mut session: Session) -> AppResult<Session> {
     if session.status != SessionStatus::Failed {
         return Err(invalid_status("Only a failed session can be retried"));
+    }
+    for chunk in session
+        .transcription
+        .iter_mut()
+        .flat_map(|track| &mut track.chunks)
+    {
+        chunk.error = None;
+    }
+    for source in [AudioSource::System, AudioSource::Microphone] {
+        session
+            .warnings
+            .retain(|warning| warning != &live::chunk_failure_notice(source));
     }
     session.status = SessionStatus::Processing;
     session.error = None;
@@ -1446,6 +1516,194 @@ mod tests {
         assert_eq!(saved.status, SessionStatus::Recording);
         assert!(saved.error.is_none());
         assert_eq!(saved.live_transcription_error.unwrap().code, "network");
+    }
+
+    #[test]
+    fn worker_recovers_transient_errors_without_losing_saved_checkpoints() {
+        use std::cell::{Cell, RefCell};
+        for code in [
+            "rate_limited",
+            "openai_server",
+            "openai_timeout",
+            "openai_network",
+        ] {
+            let (state, root, id) = state(SessionStatus::Recording);
+            let checkpoint = super::update_processing(&state, &id, |session| {
+                session.original_notes = "Keep these notes".into();
+                session.transcript = Some("Already saved words".into());
+                session.transcription = vec![super::SourceTranscript {
+                    source: super::AudioSource::System,
+                    chunks: vec![super::TranscriptChunk {
+                        error: None,
+                        start_seconds: 0.0,
+                        duration_seconds: 60.0,
+                        transcript: Some("Already saved words".into()),
+                        segment_index: None,
+                        segments: vec![],
+                    }],
+                }];
+            })
+            .unwrap();
+            let lease = super::live::ProcessingLease::claim(&state, &id)
+                .unwrap()
+                .unwrap();
+            let attempts = Cell::new(0);
+            let waits = RefCell::new(Vec::new());
+            let complete = super::run_processing_worker(
+                &state,
+                &id,
+                || {
+                    assert!(super::live::ProcessingLease::claim(&state, &id)
+                        .unwrap()
+                        .is_none());
+                    assert_eq!(
+                        state.store.get(&id).unwrap().transcription,
+                        checkpoint.transcription
+                    );
+                    attempts.set(attempts.get() + 1);
+                    match attempts.get() {
+                        1 => Err(AppError::new(code, "Temporary failure")),
+                        2 => {
+                            assert_eq!(
+                                state.store.get(&id).unwrap().status,
+                                SessionStatus::Recording
+                            );
+                            assert!(state
+                                .store
+                                .get(&id)
+                                .unwrap()
+                                .live_transcription_error
+                                .is_none());
+                            super::load_session(&state, &id)
+                        }
+                        3 => super::update_processing(&state, &id, |session| {
+                            session.status = SessionStatus::Complete
+                        }),
+                        _ => panic!("unexpected extra processing attempt"),
+                    }
+                },
+                &|_| {},
+                |delay| {
+                    waits.borrow_mut().push(delay);
+                    if attempts.get() == 2 {
+                        assert!(state
+                            .store
+                            .get(&id)
+                            .unwrap()
+                            .live_transcription_error
+                            .is_none());
+                        super::update_processing(&state, &id, |session| {
+                            session.status = SessionStatus::Processing
+                        })
+                        .unwrap();
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(complete.status, SessionStatus::Complete);
+            assert_eq!(complete.transcription, checkpoint.transcription);
+            assert_eq!(complete.original_notes, checkpoint.original_notes);
+            assert!(complete.live_transcription_error.is_none());
+            assert_eq!(
+                waits.borrow().iter().copied().sum::<Duration>(),
+                Duration::from_millis(2500)
+            );
+            drop(lease);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn worker_stop_during_backoff_finishes_processing_instead_of_replaying_failure() {
+        use std::cell::Cell;
+        let (state, root, id) = state(SessionStatus::Recording);
+        let attempts = Cell::new(0);
+        let waited = Cell::new(Duration::ZERO);
+        let complete = super::run_processing_worker(
+            &state,
+            &id,
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err(AppError::new("openai_network", "Offline briefly"))
+                } else {
+                    assert_eq!(
+                        state.store.get(&id).unwrap().status,
+                        SessionStatus::Processing
+                    );
+                    super::update_processing(&state, &id, |session| {
+                        session.status = SessionStatus::Complete
+                    })
+                }
+            },
+            &|_| {},
+            |delay| {
+                waited.set(waited.get() + delay);
+                super::update_processing(&state, &id, |session| {
+                    session.status = SessionStatus::Processing
+                })
+                .unwrap();
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(waited.get(), Duration::from_secs(2));
+        assert_eq!(complete.status, SessionStatus::Complete);
+        assert!(complete.live_transcription_error.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_caps_transient_retries_and_never_retries_permanent_errors() {
+        use std::cell::Cell;
+        for (code, expected_attempts, expected_delay) in [
+            ("openai_timeout", 4, 14),
+            ("invalid_api_key", 1, 0),
+            ("quota_exceeded", 1, 0),
+            ("model_access", 1, 0),
+            ("invalid_transcription", 1, 0),
+        ] {
+            for initial_status in [SessionStatus::Recording, SessionStatus::Processing] {
+                let (state, root, id) = state(initial_status.clone());
+                let attempts = Cell::new(0);
+                let waited = Cell::new(Duration::ZERO);
+                let error = super::run_processing_worker(
+                    &state,
+                    &id,
+                    || {
+                        attempts.set(attempts.get() + 1);
+                        assert!(attempts.get() <= expected_attempts, "retry limit exceeded");
+                        Err(AppError::new(code, "Request failed"))
+                    },
+                    &|_| {},
+                    |delay| {
+                        waited.set(waited.get() + delay);
+                        if attempts.get() == expected_attempts {
+                            let saved = state.store.get(&id).unwrap();
+                            assert_eq!(saved.status, SessionStatus::Recording);
+                            assert_eq!(saved.live_transcription_error.unwrap().code, code);
+                            super::update_processing(&state, &id, |session| {
+                                session.status = SessionStatus::Processing
+                            })
+                            .unwrap();
+                        }
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(error.code, code);
+                assert_eq!(attempts.get(), expected_attempts);
+                assert_eq!(
+                    waited.get(),
+                    Duration::from_secs(expected_delay)
+                        + if initial_status == SessionStatus::Recording {
+                            Duration::from_millis(500)
+                        } else {
+                            Duration::ZERO
+                        }
+                );
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
 
     #[test]

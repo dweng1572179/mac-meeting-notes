@@ -1,6 +1,10 @@
 <script module lang="ts">
   import type { UpdateSessionInput } from './types';
 
+  export function notesAfterSessionChange(draft: string, saved: string, dirty: boolean): string {
+    return dirty ? draft : saved;
+  }
+
   export function unsavedNotesInput(input: UpdateSessionInput, revision: number, savedRevision: number): UpdateSessionInput {
     if (revision > savedRevision) return input;
     const { notes: _acknowledged, ...metadata } = input;
@@ -108,7 +112,7 @@
   });
 
   $effect(() => {
-    if (!notesDirty && !editingNotes) notes = meetingNotes(session);
+    notes = notesAfterSessionChange(notes, meetingNotes(session), notesDirty);
     if (session.status === 'complete' && lastStatus !== 'complete' && !notesDirty && document.activeElement?.id !== 'meeting-notes') editingNotes = false;
     if (view === 'transcript' && session.transcript === null) view = 'notes';
     lastStatus = session.status;
@@ -226,7 +230,7 @@
     try {
       await flush();
       onSessionChange(await refreshInsights(session.id));
-      menuExportStatus = 'Notes updated from saved text.';
+      menuExportStatus = 'Started updating notes from saved text.';
     } catch (error) {
       menuExportError = true;
       menuExportStatus = errorMessage(error, 'Notes could not be updated. Your saved text was kept.');

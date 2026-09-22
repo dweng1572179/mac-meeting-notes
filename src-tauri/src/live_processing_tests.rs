@@ -123,6 +123,7 @@ fn stopped_capture_recovers_unregistered_final_tail_once_and_keeps_audio() {
     session.transcription = vec![SourceTranscript {
         source: AudioSource::System,
         chunks: vec![TranscriptChunk {
+            error: None,
             start_seconds: 0.0,
             duration_seconds: 60.0,
             transcript: Some("[SIMULATION] Existing checkpoint.".into()),
@@ -528,4 +529,253 @@ fn segmented_silent_microphone_adds_warning_without_losing_system_notes() {
         complete.warnings
     );
     assert_eq!(state.store.get(&fixture.id).unwrap(), complete);
+}
+
+#[test]
+fn rejected_section_does_not_block_later_checkpoints_and_retry_only_uploads_missing_audio() {
+    let fixture = Fixture::new();
+    let input = fixture.source(false, 1, false);
+    let info = crate::audio::inspect(&input).unwrap();
+    let duration = info.frames as f64 / info.sample_rate;
+    let (url, server) = server(
+        vec![
+            text_response("[SIMULATION] First section."),
+            response(
+                400,
+                json!({"error":{"code":"invalid_value","param":"file"}}),
+            ),
+            text_response("[SIMULATION] Last section."),
+            text_response("[SIMULATION] Recovered middle section."),
+        ],
+        |_| {},
+    );
+    let state = fixture.state(&url);
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.segmented_capture = true;
+    session.audio_path = None;
+    state.store.save(&session).unwrap();
+    let segments: Vec<_> = (0..3)
+        .map(|index| {
+            let path = state
+                .store
+                .segment_path(&fixture.id, AudioSource::System, index)
+                .unwrap();
+            fs::copy(&input, &path).unwrap();
+            CapturedSegment {
+                source: AudioSource::System,
+                index,
+                start_seconds: duration * index as f64,
+                duration_seconds: duration,
+                path,
+            }
+        })
+        .collect();
+    register_segments(&state, &fixture.id, &segments).unwrap();
+    let error = tauri::async_runtime::block_on(transcribe_available(
+        &state,
+        &fixture.id,
+        "test-only",
+        &|_| {},
+    ))
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_audio");
+    let saved = state.store.get(&fixture.id).unwrap();
+    let chunks = &saved.transcription[0].chunks;
+    assert!(chunks[0].transcript.is_some());
+    assert!(chunks[1].transcript.is_none());
+    assert!(chunks[2].transcript.is_some());
+    assert!(saved.enriched_notes.is_none());
+    assert_ne!(saved.status, SessionStatus::Complete);
+    assert!(!segments[0].path.exists());
+    assert!(segments[1].path.exists());
+    assert!(!segments[2].path.exists());
+    let mut failed = saved;
+    failed.status = SessionStatus::Failed;
+    state.store.save(&retry_start(failed).unwrap()).unwrap();
+    tauri::async_runtime::block_on(transcribe_available(
+        &state,
+        &fixture.id,
+        "test-only",
+        &|_| {},
+    ))
+    .unwrap();
+    assert_eq!(server.join().unwrap().len(), 4);
+    assert!(!segments[1].path.exists());
+}
+
+#[test]
+#[ignore = "Uses paid OpenAI transcription/enrichment on synthetic Spanish/English speech"]
+fn live_bilingual_conversation_quality_with_openai() {
+    let fixture = Fixture::new();
+    let state = fixture.state("https://api.openai.com/v1");
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.title = "[SIMULATION] Language practice".into();
+    session.context = "Spanish and English language practice about food. Preserve concrete examples and unanswered questions; no project is being planned. Write the notes in English.".into();
+    session.original_notes.clear();
+    session.segmented_capture = true;
+    session.transcription_settings = crate::domain::TranscriptionSettings::new_recording_default();
+    state.store.save(&session).unwrap();
+    let mut start = 0.0;
+    let mut sections = Vec::new();
+    for (index, voice, speech) in [
+        (0, "Paulina", "Hola, me llamo Lucía. Esta es una conversación simulada para practicar idiomas. Los domingos preparo pozole con mi abuela. No uso pollo; uso cerdo. La receta lleva tres tipos de chile. No sé cuánto cuesta prepararla. ¿Tienes una receta familiar? No hemos decidido organizar una cena ni comprar nada."),
+        (1, "Samantha", "My name is Alex. This is simulated language practice. My grandfather taught me to make dumplings. We fold thirty dumplings together every Saturday. I do not know whether the restaurant is open on Monday. That question is unanswered. We have reached the end of our practice conversation. There are no assigned tasks or future plans."),
+    ] {
+        let script = fixture.root.join(format!("voice-{index}.txt"));
+        let aiff = fixture.root.join(format!("voice-{index}.aiff"));
+        fs::write(&script, speech).unwrap();
+        assert!(std::process::Command::new("/usr/bin/say").args(["-v", voice, "-r", "160", "-f"]).arg(&script).arg("-o").arg(&aiff).output().unwrap().status.success());
+        let path = state.store.segment_path(&fixture.id, AudioSource::System, index).unwrap();
+        assert!(std::process::Command::new("/usr/bin/afconvert").args(["-f", "m4af", "-d", "aac", "-b", "32000"]).arg(&aiff).arg(&path).output().unwrap().status.success());
+        let info = crate::audio::inspect(&path).unwrap();
+        let duration = info.frames as f64 / info.sample_rate;
+        sections.push(CapturedSegment { source: AudioSource::System, index, start_seconds: start, duration_seconds: duration, path });
+        start += duration;
+    }
+    let credential = std::process::Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "com.dweng.meetingnotes",
+            "-a",
+            "openai-api-key",
+            "-w",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        credential.status.success(),
+        "Login Keychain requires manual access approval"
+    );
+    let key = String::from_utf8(credential.stdout).unwrap();
+    register_segments(&state, &fixture.id, &sections).unwrap();
+    let result = tauri::async_runtime::block_on(process_session_with_key(
+        &state,
+        &fixture.id,
+        key.trim(),
+        |_| {},
+    ))
+    .unwrap();
+    let transcript = result.transcript.as_ref().unwrap().to_lowercase();
+    let notes = result.notes().to_lowercase();
+    // Only synthetic output is printed; never use an existing local meeting for this test.
+    println!("SYNTHETIC BILINGUAL TRANSCRIPT: {transcript}\nSYNTHETIC BILINGUAL NOTES: {notes}");
+    for word in ["pozole", "cerdo", "dumplings", "monday"] {
+        assert!(transcript.contains(word), "missing spoken detail: {word}");
+    }
+    for word in ["pozole", "pork", "dumplings", "saturday", "monday"] {
+        assert!(notes.contains(word), "missing note detail: {word}");
+    }
+    assert!(notes.contains("30") || notes.contains("thirty"));
+    assert!(notes.contains("three") || notes.contains('3'));
+    assert!(
+        !notes.contains("## decisions"),
+        "social wrap-up is not a decision"
+    );
+    assert!(
+        !notes.contains("## action items"),
+        "no commitments were made"
+    );
+    assert_eq!(result.status, SessionStatus::Complete);
+    assert!(sections.iter().all(|section| !section.path.exists()));
+    assert_eq!(
+        state.store.get(&fixture.id).unwrap().notes(),
+        result.notes()
+    );
+    println!(
+        "BILINGUAL_ACCEPTANCE seconds={start:.1} sections={} model={} status=complete",
+        sections.len(),
+        result.transcription_settings.model
+    );
+}
+
+#[test]
+fn worker_keeps_transcribing_new_sections_after_a_section_specific_rejection() {
+    let fixture = Fixture::new();
+    let input = fixture.source(false, 1, false);
+    let info = crate::audio::inspect(&input).unwrap();
+    let duration = info.frames as f64 / info.sample_rate;
+    let (url, server) = server(
+        vec![
+            response(
+                400,
+                json!({"error":{"code":"invalid_value","param":"file"}}),
+            ),
+            text_response("[SIMULATION] Arrived after the rejection."),
+        ],
+        |_| {},
+    );
+    let state = fixture.state(&url);
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Recording;
+    session.segmented_capture = true;
+    session.audio_path = None;
+    state.store.save(&session).unwrap();
+    let segments: Vec<_> = (0..2)
+        .map(|index| {
+            let path = state
+                .store
+                .segment_path(&fixture.id, AudioSource::System, index)
+                .unwrap();
+            fs::copy(&input, &path).unwrap();
+            CapturedSegment {
+                source: AudioSource::System,
+                index,
+                start_seconds: duration * index as f64,
+                duration_seconds: duration,
+                path,
+            }
+        })
+        .collect();
+    register_segments(&state, &fixture.id, &segments[..1]).unwrap();
+    let mut polls = 0;
+    let error = run_processing_worker(
+        &state,
+        &fixture.id,
+        || {
+            tauri::async_runtime::block_on(process_session_with_key(
+                &state,
+                &fixture.id,
+                "test-only",
+                |_| {},
+            ))
+        },
+        &|_| {},
+        |_| {
+            polls += 1;
+            match polls {
+                1 => {
+                    register_segments(&state, &fixture.id, &segments[1..]).unwrap();
+                }
+                2 => {
+                    update_processing(&state, &fixture.id, |session| {
+                        session.status = SessionStatus::Processing
+                    })
+                    .unwrap();
+                }
+                _ => panic!("a section rejection must not pause the uploader"),
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_audio");
+    assert_eq!(
+        server.join().unwrap().len(),
+        2,
+        "the rejected section is not automatically rebilled"
+    );
+    let saved = state.store.get(&fixture.id).unwrap();
+    assert_eq!(
+        saved.transcription[0].chunks[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .code,
+        "invalid_audio"
+    );
+    assert!(saved.transcription[0].chunks[0].transcript.is_none());
+    assert!(saved.transcription[0].chunks[1].transcript.is_some());
+    assert!(saved.enriched_notes.is_none());
+    assert!(segments[0].path.exists());
+    assert!(!segments[1].path.exists());
 }

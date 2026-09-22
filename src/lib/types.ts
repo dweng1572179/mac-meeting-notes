@@ -13,6 +13,7 @@ export type AiSuggestions = {
 };
 export type TranscriptSegment = { id: string; speaker: string; startSeconds: number; endSeconds: number; text: string };
 export type TranscriptChunk = {
+  error?: { code: string; message: string } | null;
   startSeconds: number;
   durationSeconds: number;
   transcript: string | null;

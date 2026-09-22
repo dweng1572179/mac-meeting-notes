@@ -42,6 +42,6 @@ export function recordingTranscriptionLabel(session: Session): string {
   if (session.liveTranscriptionError) return 'Transcript paused · audio kept';
   const chunks = session.transcription?.flatMap((track) => track.chunks) ?? [];
   if (!chunks.length) return 'Transcript starts after the first minute';
-  return chunks.some((chunk) => chunk.transcript === null)
-    ? 'Transcribing in the background' : 'Transcript caught up';
+  if (chunks.some((chunk) => chunk.transcript === null && !chunk.error)) return 'Transcribing in the background';
+  return chunks.some((chunk) => chunk.error) ? 'Some sections need retry · audio kept' : 'Transcript caught up';
 }

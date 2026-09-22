@@ -152,7 +152,7 @@
     </button>
   </div>
   {#if session.liveTranscriptionError}
-    <p class="live-transcription-warning" role="status">Recording continues. {session.liveTranscriptionError.message} Audio is saved for retry after you stop.</p>
+    <p class="live-transcription-warning" role="status">Recording continues. {session.liveTranscriptionError.message} Temporary connection or service errors get up to three automatic retries. If processing stays paused, stop and resume it; your audio is kept.</p>
   {/if}
 {:else if session.status === 'processing'}
   <div class="recording-dock processing" role="status" aria-live="polite">

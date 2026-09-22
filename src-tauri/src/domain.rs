@@ -143,6 +143,8 @@ impl AudioSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptChunk {
+    #[serde(default)]
+    pub error: Option<AppError>,
     pub start_seconds: f64,
     pub duration_seconds: f64,
     pub transcript: Option<String>,
@@ -484,7 +486,12 @@ pub fn transcript_turns(session: &Session) -> Vec<TranscriptTurn> {
                 continue;
             };
             let key = chunk_key(track.source, chunk);
-            if chunk.segments.is_empty() {
+            if chunk.segments.is_empty()
+                || !text.split_whitespace().eq(chunk
+                    .segments
+                    .iter()
+                    .flat_map(|segment| segment.text.split_whitespace()))
+            {
                 turns.push(TranscriptTurn {
                     id: format!("{key}:text"),
                     speaker_key: None,
@@ -514,10 +521,23 @@ pub fn transcript_turns(session: &Session) -> Vec<TranscriptTurn> {
 }
 
 pub fn meeting_sources(session: &Session) -> Vec<MeetingSource> {
+    let unchanged_generated_notes = session.enriched_notes.as_ref().is_some_and(|generated| {
+        session
+            .notes
+            .as_ref()
+            .or(session.edited_enriched_notes.as_ref())
+            .map_or(true, |notes| notes == generated)
+    });
+    // ponytail: revised documents remain whole; range provenance is needed to separate later edits from generated text.
+    let notes = if unchanged_generated_notes {
+        session.original_notes.clone()
+    } else {
+        session.notes()
+    };
     let mut sources: Vec<_> = [
         ("manual-title", session.title.clone()),
         ("manual-context", session.context.clone()),
-        ("manual-notes", session.notes()),
+        ("manual-notes", notes),
         ("manual-attendees", session.attendees.join(", ")),
     ]
     .into_iter()
@@ -544,28 +564,6 @@ pub fn meeting_sources(session: &Session) -> Vec<MeetingSource> {
             id: turn.id,
             text: turn.text,
         }));
-        // Preserve any raw words not represented by the provider's timed segments.
-        for track in &session.transcription {
-            for chunk in &track.chunks {
-                if let Some(text) = chunk
-                    .transcript
-                    .as_ref()
-                    .filter(|_| !chunk.segments.is_empty())
-                {
-                    let segment_words: Vec<_> = chunk
-                        .segments
-                        .iter()
-                        .flat_map(|segment| segment.text.split_whitespace())
-                        .collect();
-                    if text.split_whitespace().collect::<Vec<_>>() != segment_words {
-                        sources.push(MeetingSource {
-                            id: format!("raw:{}", chunk_key(track.source, chunk)),
-                            text: text.clone(),
-                        });
-                    }
-                }
-            }
-        }
     }
     sources
 }
