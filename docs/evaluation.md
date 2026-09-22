@@ -247,3 +247,14 @@ Native navigation back to the library and reopening verified the Notes sections,
 ### Reliability audit — v0.4.4
 
 See [the full audit](reliability-audit-2026-09-22.md) for reproduced failures, corrections, paid bilingual/decision acceptance, cost assumptions and remaining hardware limits. The local v0.4.4 check passed 155 ordinary Rust tests, including parked-section persistence, processing new sections after rejection, bounded retries, malformed metadata, interrupted response bodies and evidence consistency. Both paid speech fixtures passed separately. Mounted editor checks passed focus synchronization, dirty-draft preservation, the next save and refresh-start copy. All-target Clippy passed with warnings denied; formatting and diff checks passed. The 61 frontend/API tests passed; Svelte reported zero errors/warnings and the production frontend built successfully.
+
+
+### Published artifact and installation — v0.4.4
+
+[Release v0.4.4](https://github.com/dweng1572179/mac-meeting-notes/releases/tag/v0.4.4) was built from `5841e199baca0360ed2d84d8323275802d8d7c22`. [Release run 35798855977](https://github.com/dweng1572179/mac-meeting-notes/actions/runs/35798855977) passed frontend tests/type checks, Rust tests, all-target Clippy, production build, packaging regression and mounted-app signature verification.
+
+- Public DMG: 6,180,646 bytes; SHA-256 `8cb0d901dc688cf221f8774a011b0d14bd691b85b9853ead2048c5d81517f809`, matching the GitHub asset digest.
+- Installed app: version 0.4.4; every bundle file matched the public artifact. Executable SHA-256 `a592ecd530d0d72aa4b5b69d20f0fc1cb2fceaa3853136d184e4995298bdfc83`.
+- Fresh session checks found no active recording/processing before graceful quit and replacement. The app reopened the saved library, notes and transcript successfully.
+- All three existing meeting JSON files remained byte-for-byte unchanged. No saved meeting was reprocessed.
+- Temporary build caches, browser/dev sessions, installation staging and the previous app backup were cleaned. One verified current DMG remains in Downloads.
