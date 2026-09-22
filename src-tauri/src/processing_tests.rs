@@ -823,3 +823,88 @@ fn product_no_speech_retry_adopts_settings_and_clears_resolved_warning() {
 
 #[path = "live_processing_tests.rs"]
 mod live_tests;
+
+#[test]
+fn invalid_speaker_timing_does_not_block_either_processing_path() {
+    for segmented in [false, true] {
+        // First response fails provider-duration validation; second fails local-duration validation.
+        for (provider_duration, end) in [(3.0, 0.0), (9.0, 8.0)] {
+            let fixture = Fixture::new();
+            let input = fixture.source(false, 3, false);
+            let info = crate::audio::inspect(&input).unwrap();
+            let duration = info.frames as f64 / info.sample_rate;
+            let (url, server) = server(
+                vec![
+                    response(
+                        200,
+                        json!({
+                            "text":"[SIMULATION] Words survived.", "duration":provider_duration,
+                            "segments":[{"id":"s0","speaker":"A","start":0.0,"end":end,"text":"[SIMULATION] Words survived."}]
+                        }),
+                    ),
+                    enrichment(),
+                ],
+                |_| {},
+            );
+            let state = fixture.state(&url);
+            let mut session = state.store.get(&fixture.id).unwrap();
+            session.transcription_settings.model = "gpt-4o-transcribe-diarize".into();
+            session.segmented_capture = segmented;
+            let source_path = if segmented {
+                let path = state
+                    .store
+                    .segment_path(&fixture.id, AudioSource::System, 0)
+                    .unwrap();
+                fs::rename(input, &path).unwrap();
+                session.audio_path = None;
+                session.capture_segments = vec![crate::domain::CaptureSegment {
+                    source: AudioSource::System,
+                    index: 0,
+                    start_seconds: 0.0,
+                    duration_seconds: duration,
+                }];
+                session.transcription = vec![SourceTranscript {
+                    source: AudioSource::System,
+                    chunks: vec![TranscriptChunk {
+                        segment_index: Some(0),
+                        start_seconds: 0.0,
+                        duration_seconds: duration,
+                        transcript: None,
+                        segments: vec![],
+                    }],
+                }];
+                path
+            } else {
+                input
+            };
+            state.store.save(&session).unwrap();
+            let complete = tauri::async_runtime::block_on(process_session_with_key(
+                &state,
+                &fixture.id,
+                "test-only",
+                |_| {},
+            ))
+            .expect("speaker annotation errors must not block usable words");
+            assert_eq!(server.join().unwrap().len(), 2, "no extra paid retry");
+            assert_eq!(complete.status, SessionStatus::Complete);
+            assert_eq!(complete.original_notes, session.original_notes);
+            assert_eq!(
+                complete.transcription[0].chunks[0].transcript.as_deref(),
+                Some("[SIMULATION] Words survived.")
+            );
+            assert!(complete.transcription[0].chunks[0].segments.is_empty());
+            assert!(complete
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Speaker") && warning.contains("text")));
+            assert!(
+                !source_path.exists(),
+                "audio cleanup follows the durable transcript"
+            );
+            assert_eq!(
+                state.store.get(&fixture.id).unwrap().status,
+                SessionStatus::Complete
+            );
+        }
+    }
+}

@@ -185,24 +185,21 @@ impl OpenAiClient {
                 "OpenAI reached the transcription output limit. Your audio was kept.",
             ));
         }
-        let result = TranscriptionResult {
+        let mut result = TranscriptionResult {
+            omitted_speakers: diarize
+                && !transcription.text.trim().is_empty()
+                && transcription.segments.is_empty(),
             text: transcription.text,
             segments: transcription.segments,
         };
         if diarize {
-            let duration = transcription.duration.ok_or_else(|| {
-                AppError::new(
-                    "invalid_transcription",
-                    "OpenAI returned no audio duration. Your audio was kept.",
-                )
-            })?;
-            if result.text.trim().is_empty() != result.segments.is_empty() {
+            if result.text.trim().is_empty() && !result.segments.is_empty() {
                 return Err(AppError::new(
                     "invalid_transcription",
                     "OpenAI returned incomplete speaker segments. Your audio was kept.",
                 ));
             }
-            result.validate(duration)?;
+            result.retain_valid_speakers(transcription.duration.unwrap_or(f64::NAN))?;
         }
         Ok(result)
     }

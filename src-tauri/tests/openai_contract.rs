@@ -608,13 +608,14 @@ fn enrichment_rejects_invented_suggestion_evidence() {
 }
 
 #[test]
-fn diarization_rejects_invalid_turns_without_consuming_source_audio() {
+fn diarization_keeps_words_when_speaker_metadata_is_invalid() {
     let path = std::env::temp_dir().join(format!("diarize-invalid-{}.m4a", uuid::Uuid::new_v4()));
     std::fs::write(&path, [0, 0, 0, 9, b'm', b'd', b'a', b't', 1]).unwrap();
     let mut source = session();
     source.transcription_settings.model = "gpt-4o-transcribe-diarize".into();
     for segments in [
         json!([]),
+        json!([{"id":"s0","speaker":"A","start":2.0,"end":2.0,"text":"Words"}]),
         json!([{"id":"s0","speaker":"A","start":-1.0,"end":2.0,"text":"Words"}]),
         json!([{"id":"s0","speaker":"","start":0.0,"end":2.0,"text":"Words"}]),
         json!([{"id":"s0","speaker":"A","start":0.0,"end":5.1,"text":"Words"}]),
@@ -627,9 +628,41 @@ fn diarization_rejects_invalid_turns_without_consuming_source_audio() {
         let result = tauri::async_runtime::block_on(
             OpenAiClient::with_base_url(url).transcribe_session(&path, "test-key", &source),
         );
-        assert_eq!(result.unwrap_err().code, "invalid_transcription");
+        let result = result.expect("usable words must survive invalid speaker metadata");
+        assert_eq!(result.text, "Words");
+        assert!(result.segments.is_empty());
         assert!(path.exists());
     }
+    for duration in [json!(null), json!(-1.0)] {
+        let (url, _) = local_server(json_response(
+            200,
+            &json!({
+                "text":"Words", "duration":duration,
+                "segments":[{"id":"s0","speaker":"A","start":0.0,"end":2.0,"text":"Words"}]
+            })
+            .to_string(),
+        ));
+        let result = tauri::async_runtime::block_on(
+            OpenAiClient::with_base_url(url).transcribe_session(&path, "test-key", &source),
+        )
+        .expect("duration metadata must not discard usable text");
+        assert_eq!(result.text, "Words");
+        assert!(result.segments.is_empty());
+    }
+    let (url, _) = local_server(json_response(
+        200,
+        &json!({
+            "text":"", "duration":4.0,
+            "segments":[{"id":"s0","speaker":"A","start":0.0,"end":2.0,"text":"Words"}]
+        })
+        .to_string(),
+    ));
+    let error = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url(url).transcribe_session(&path, "test-key", &source),
+    )
+    .expect_err("an inconsistent empty transcript must still retain audio for retry");
+    assert_eq!(error.code, "invalid_transcription");
+    assert!(path.exists());
     std::fs::remove_file(path).unwrap();
 }
 

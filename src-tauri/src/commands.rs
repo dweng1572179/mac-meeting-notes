@@ -22,6 +22,8 @@ use crate::{
 
 const SESSION_UPDATED: &str = "session-updated";
 const QUESTION_SESSION_LIMIT: usize = 20;
+const SPEAKER_TIMING_NOTICE: &str =
+    "Speaker labels are unavailable for some audio. Its transcript text was kept.";
 
 #[path = "insights.rs"]
 pub mod insights;
@@ -763,9 +765,12 @@ async fn transcribe_source(
             .transcribe_session(&output, api_key, &session)
             .await
         {
-            Ok(result) => {
-                result.validate(length)?;
+            Ok(mut result) => {
+                result.retain_valid_speakers(length)?;
                 let saved = update_processing(state, id, |session| {
+                    if result.omitted_speakers {
+                        add_warning(session, SPEAKER_TIMING_NOTICE.into());
+                    }
                     let track = session
                         .transcription
                         .iter_mut()

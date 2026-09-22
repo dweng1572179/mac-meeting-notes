@@ -280,9 +280,12 @@ pub(super) async fn transcribe_available(
             .transcribe_session(&output, api_key, &session)
             .await
         {
-            Ok(result) => {
-                result.validate(length)?;
+            Ok(mut result) => {
+                result.retain_valid_speakers(length)?;
                 let saved = update_processing(state, id, |session| {
+                    if result.omitted_speakers {
+                        add_warning(session, SPEAKER_TIMING_NOTICE.into());
+                    }
                     let track = session
                         .transcription
                         .iter_mut()
