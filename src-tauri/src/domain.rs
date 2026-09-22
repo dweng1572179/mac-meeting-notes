@@ -349,13 +349,22 @@ pub struct TranscriptSegment {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TranscriptionResult {
+    pub omitted_speakers: bool,
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
 }
 
 impl TranscriptionResult {
-    pub fn validate(&self, duration_seconds: f64) -> AppResult<()> {
-        validate_transcript_segments(&self.segments, duration_seconds)
+    pub fn retain_valid_speakers(&mut self, duration_seconds: f64) -> AppResult<()> {
+        if let Err(error) = validate_transcript_segments(&self.segments, duration_seconds) {
+            if self.text.trim().is_empty() {
+                return Err(error);
+            }
+            // Speaker annotations are optional; keep usable words without inventing timing.
+            self.segments.clear();
+            self.omitted_speakers = true;
+        }
+        Ok(())
     }
 }
 

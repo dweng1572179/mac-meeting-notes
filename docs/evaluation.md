@@ -219,3 +219,12 @@ The public DMG is 6,167,780 bytes; SHA-256 `babaca1553d4f8bc2872f056a1e2f54e17bb
 Native UI verification passed: the existing TEST meeting opened under Notes with Edit notes and Transcript controls, without the old ownership tabs. The exact reported question, “what was it about”, succeeded in the installed app and displayed nine locally resolved saved-source citations. This additional native check used TEST's saved text; it did not record audio, retranscribe either meeting, or open the protected lecture. Both existing meeting JSON files remained byte-for-byte unchanged after the question.
 
 Verification browser/server, local build caches, temporary installer/mount, and rollback bundle were cleaned. The latest verified DMG remains in Downloads, and the installed app remains open on TEST with its successful answer.
+
+
+## v0.4.3 speaker timestamp recovery — 2026-09-22
+
+A retained recording failed with `invalid_transcription` after the provider returned unusable speaker timing. Repeating the affected upload returned valid text and timing, so the exact malformed value in the original discarded response could not be recovered. The deterministic regression reproduced the same saved error using a zero-duration turn.
+
+The fix treats speaker annotations as optional when nonempty transcript text is available. Invalid annotations are discarded without manufacturing timestamps or requesting another transcription; the text and a speaker-label notice are saved together. Both provider-reported duration and actual saved chunk duration are checked, for recording-time sections and legacy files. Strict persisted-segment validation and save-before-audio-cleanup remain unchanged. Inconsistent empty responses, real HTTP failures, and output-limit detection still fail safely with audio retained.
+
+The focused tests failed before implementation and passed afterward. Coverage includes zero/negative/out-of-range timestamps, missing labels/segments/duration, duplicate IDs, text preservation, durable notices, both processing paths, and no extra HTTP request. The ordinary Rust suite passed 145 checks (three paid tests excluded); all-target Clippy denied warnings, formatting and whitespace checks passed. Independent read-only review found no blocking issues. All 56 frontend/API tests passed; Svelte reported zero errors/warnings, and the production frontend build passed. Public-artifact, installation, and actual recovery results follow after their verification.
