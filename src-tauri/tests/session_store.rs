@@ -59,6 +59,7 @@ fn incomplete_section_manifest_cannot_authorize_audio_cleanup() {
     session.transcription = vec![meeting_notes_lib::domain::SourceTranscript {
         source: meeting_notes_lib::domain::AudioSource::System,
         chunks: vec![meeting_notes_lib::domain::TranscriptChunk {
+            error: None,
             segment_index: Some(0),
             start_seconds: 0.0,
             duration_seconds: 30.0,
@@ -563,12 +564,13 @@ fn delete_rejects_an_audio_directory_symlinked_outside_app_data() {
 #[test]
 fn malformed_chunk_progress_is_rejected_before_it_can_drive_cleanup_or_retry() {
     use meeting_notes_lib::domain::{AudioSource, SourceTranscript, TranscriptChunk};
-    for (start, duration, duplicate) in [
-        (-1.0, 1.0, false),
-        (0.0, 0.0, false),
-        (0.0, 301.0, false),
-        (1.0, 1.0, false),
-        (0.0, 1.0, true),
+    for (start, duration, duplicate, failed) in [
+        (-1.0, 1.0, false, false),
+        (0.0, 0.0, false, false),
+        (0.0, 301.0, false, false),
+        (1.0, 1.0, false, false),
+        (0.0, 1.0, true, false),
+        (0.0, 1.0, false, true),
     ] {
         let root =
             std::env::temp_dir().join(format!("meeting-notes-progress-{}", uuid::Uuid::new_v4()));
@@ -581,6 +583,8 @@ fn malformed_chunk_progress_is_rejected_before_it_can_drive_cleanup_or_retry() {
         let track = SourceTranscript {
             source: AudioSource::System,
             chunks: vec![TranscriptChunk {
+                error: failed
+                    .then(|| meeting_notes_lib::domain::AppError::new("invalid_audio", "kept")),
                 segment_index: None,
                 segments: Vec::new(),
                 start_seconds: start,

@@ -19,6 +19,15 @@ it('distinguishes recording from pending, caught-up, and paused transcription', 
   expect(recordingTranscriptionLabel(recording)).toBe('Transcript paused · audio kept');
 });
 
+it('distinguishes parked section failures from uploads still in progress', () => {
+  const recording = failed({ status: 'recording', error: null, transcription: [{ source: 'system', chunks: [
+    { startSeconds: 0, durationSeconds: 60, transcript: null, error: { code: 'invalid_audio', message: 'Audio kept' } }
+  ] }] });
+  expect(recordingTranscriptionLabel(recording)).toBe('Some sections need retry · audio kept');
+  recording.transcription![0].chunks.push({ startSeconds: 60, durationSeconds: 60, transcript: null });
+  expect(recordingTranscriptionLabel(recording)).toBe('Transcribing in the background');
+});
+
 describe('error recovery', () => {
   it('keeps structured backend details and adds only relevant permission guidance', () => {
     expect(errorMessage({ code: 'rate_limit', message: 'Try later. Request ID: req_123' })).toBe('Try later. Request ID: req_123');

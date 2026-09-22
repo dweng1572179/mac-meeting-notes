@@ -199,8 +199,12 @@ impl RecordingHealth {
             if let Some(detail) = detail {
                 warnings.push(format!("{label} {detail}."));
             }
-            // A write failure can coexist with a substantial gap; preserve the duration evidence.
-            if source.status == CaptureStatus::WriteError {
+            // Resumed callbacks do not recover missing audio; keep coverage visible after startup.
+            if source.status == CaptureStatus::WriteError
+                || (source.status == CaptureStatus::Healthy
+                    && wall_seconds >= 10.0
+                    && wall_seconds - source.captured_seconds > 5.0)
+            {
                 warnings.push(format!(
                     "{label} accepted {:.1} seconds of audio during {:.1} seconds of recording.",
                     source.captured_seconds, wall_seconds
@@ -1994,6 +1998,37 @@ mod tests {
             counters.snapshot(48_000.0, 24.0, false).status,
             CaptureStatus::Healthy
         );
+        let microphone = SourceCounters::default();
+        microphone.callback(24_000);
+        microphone.complete_write(24 * 48_000, 0);
+        let health = RecordingHealth::from_sources(
+            24.0,
+            counters.snapshot(48_000.0, 24.0, false),
+            microphone.snapshot(48_000.0, 24.0, false),
+        );
+        assert_eq!(
+            health.warnings,
+            ["System audio accepted 2.0 seconds of audio during 24.0 seconds of recording."]
+        );
+    }
+
+    #[test]
+    fn live_coverage_warning_allows_startup_and_small_timing_deficits() {
+        for (wall, captured, expected_warnings) in [
+            (9.0, 1, 0),
+            (10.0, 5, 0),
+            (10.0, 4, 2),
+            (600.0, 594, 2),
+            (600.0, 600, 0),
+        ] {
+            let counters = SourceCounters::default();
+            counters.callback((wall * 1_000.0) as u64);
+            counters.complete_write(captured * 48_000, 0);
+            let source = counters.snapshot(48_000.0, wall, false);
+            assert_eq!(source.status, CaptureStatus::Healthy);
+            let health = RecordingHealth::from_sources(wall, source.clone(), source);
+            assert_eq!(health.warnings.len(), expected_warnings, "wall={wall}");
+        }
     }
 
     #[test]

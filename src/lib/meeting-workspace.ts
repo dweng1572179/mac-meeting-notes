@@ -32,13 +32,14 @@ export function meetingNotes(session: Pick<Session, 'notes' | 'originalNotes' | 
 }
 
 export function transcriptTurns(input: TranscriptTrack[] | { transcription?: TranscriptTrack[]; transcript?: string | null } = []): TranscriptTurn[] {
+  const words = (text: string) => text.match(/[^\p{White_Space}]+/gu)?.join(' ') ?? '';
   const tracks = Array.isArray(input) ? input : input.transcription ?? [];
   const turns: TranscriptTurn[] = tracks.flatMap((track): TranscriptTurn[] => track.chunks.flatMap((chunk): TranscriptTurn[] => {
     const chunkKey = chunk.segmentIndex === null || chunk.segmentIndex === undefined
       ? `${track.source}:offset-${Math.round(chunk.startSeconds * 1000)}`
       : `${track.source}:segment-${chunk.segmentIndex}:offset-${Math.round(chunk.startSeconds * 1000)}`;
     const segments = chunk.segments ?? [];
-    if (!segments.length) {
+    if (!segments.length || words(segments.map((segment) => segment.text).join(' ')) !== words(chunk.transcript ?? '')) {
       return chunk.transcript?.trim() ? [{
         id: `${chunkKey}:text`,
         speakerKey: null,

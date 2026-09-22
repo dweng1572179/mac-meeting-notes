@@ -107,6 +107,7 @@ pub(super) fn append_segments(session: &mut Session, segments: &[CapturedSegment
         while offset < segment.duration_seconds - 0.000_001 {
             let duration = (segment.duration_seconds - offset).min(300.0);
             track.chunks.push(TranscriptChunk {
+                error: None,
                 start_seconds: segment.start_seconds + offset,
                 duration_seconds: duration,
                 transcript: None,
@@ -210,8 +211,11 @@ pub(super) async fn transcribe_available(
     api_key: &str,
     progress: &impl Fn(Session),
 ) -> AppResult<()> {
-    let mut unreadable = Vec::<(AudioSource, TranscriptChunk)>::new();
-    let mut first_error = None;
+    let mut first_error = load_session(state, id)?
+        .transcription
+        .iter()
+        .flat_map(|track| &track.chunks)
+        .find_map(|chunk| chunk.error.clone());
     loop {
         let session = load_session(state, id)?;
         let pending = session
@@ -222,17 +226,16 @@ pub(super) async fn transcribe_available(
                     .chunks
                     .iter()
                     .enumerate()
-                    .filter(|(_, chunk)| {
-                        chunk.transcript.is_none()
-                            && !unreadable.iter().any(|(source, failed)| {
-                                *source == track.source && same_chunk(failed, chunk)
-                            })
-                    })
+                    .filter(|(_, chunk)| chunk.transcript.is_none() && chunk.error.is_none())
                     .map(move |(_, chunk)| (track.source, chunk.clone()))
             })
             .min_by(|(_, a), (_, b)| a.start_seconds.total_cmp(&b.start_seconds));
         let Some((source, chunk)) = pending else {
-            return first_error.map_or(Ok(()), Err);
+            return if session.status == SessionStatus::Recording {
+                Ok(())
+            } else {
+                first_error.map_or(Ok(()), Err)
+            };
         };
         let segment_index = chunk.segment_index.ok_or_else(|| {
             AppError::new(
@@ -267,11 +270,7 @@ pub(super) async fn transcribe_available(
             )
         })?;
         if let Err(error) = prepared {
-            progress(update_processing(state, id, |session| {
-                add_warning(session,
-                format!("{} has an unreadable section. That audio was kept; other sections can still be transcribed.", source.label()))
-            })?);
-            unreadable.push((source, chunk));
+            progress(checkpoint_chunk_error(state, id, source, &chunk, &error)?);
             first_error.get_or_insert(error);
             continue;
         }
@@ -320,10 +319,12 @@ pub(super) async fn transcribe_available(
                         index..=index,
                         [
                             TranscriptChunk {
+                                error: None,
                                 duration_seconds: length / 2.0,
                                 ..chunk.clone()
                             },
                             TranscriptChunk {
+                                error: None,
                                 start_seconds: chunk.start_seconds + length / 2.0,
                                 duration_seconds: length / 2.0,
                                 ..chunk
@@ -332,9 +333,47 @@ pub(super) async fn transcribe_available(
                     );
                 })?);
             }
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "invalid_audio" | "transcription_too_long" | "invalid_transcription"
+                ) =>
+            {
+                progress(checkpoint_chunk_error(state, id, source, &chunk, &error)?);
+                remove_audio_file(output)?;
+                first_error.get_or_insert(error);
+            }
             Err(error) => return Err(error),
         }
     }
+}
+
+pub(super) fn chunk_failure_notice(source: AudioSource) -> String {
+    format!("{} has a section that could not be transcribed. That audio was kept; other sections can still be transcribed.", source.label())
+}
+
+fn checkpoint_chunk_error(
+    state: &AppState,
+    id: &str,
+    source: AudioSource,
+    chunk: &TranscriptChunk,
+    error: &AppError,
+) -> AppResult<Session> {
+    update_processing(state, id, |session| {
+        let failed = session
+            .transcription
+            .iter_mut()
+            .find(|track| track.source == source)
+            .and_then(|track| {
+                track
+                    .chunks
+                    .iter_mut()
+                    .find(|saved| same_chunk(saved, chunk))
+            })
+            .expect("pending section retained");
+        failed.error = Some(error.clone());
+        add_warning(session, chunk_failure_notice(source));
+    })
 }
 
 fn same_chunk(left: &TranscriptChunk, right: &TranscriptChunk) -> bool {
