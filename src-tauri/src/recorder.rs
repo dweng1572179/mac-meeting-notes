@@ -29,16 +29,15 @@ fn segment_path(base: &Path, source: AudioSource, index: u64) -> AppResult<PathB
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .ok_or_else(|| AppError::new("invalid_audio_path", "Invalid capture session path"))?;
-    if base
+    let extension = base
         .extension()
-        .map_or(true, |extension| extension != "m4a")
-    {
-        return Err(AppError::new(
-            "invalid_audio_path",
-            "Invalid capture session path",
-        ));
-    }
-    Ok(base.with_file_name(format!("{id}-{}-segment-{index:08}.m4a", source.filename())))
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| matches!(*extension, "m4a" | "wav"))
+        .ok_or_else(|| AppError::new("invalid_audio_path", "Invalid capture session path"))?;
+    Ok(base.with_file_name(format!(
+        "{id}-{}-segment-{index:08}.{extension}",
+        source.filename()
+    )))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +76,7 @@ pub struct RecordingHealth {
 #[serde(rename_all = "camelCase")]
 pub struct SourceHealth {
     pub admitted_frames: u64,
-    // Frames accepted by ExtAudioFileWriteAsync; stop also reports final flush errors.
+    // Frames accepted by the file writer; stop also reports final flush errors.
     pub written_frames: u64,
     pub captured_seconds: f64,
     pub sample_rate: f64,
@@ -187,7 +186,12 @@ impl RecordingHealth {
                     "has not delivered writable audio frames for at least 10 seconds".to_owned(),
                 ),
                 CaptureStatus::WriteError => Some(format!(
-                    "could not write some audio (OSStatus {})",
+                    "could not write some audio ({} {})",
+                    if cfg!(target_os = "windows") {
+                        "error"
+                    } else {
+                        "OSStatus"
+                    },
                     source.write_error.unwrap_or_default()
                 )),
                 CaptureStatus::ShortCapture => Some(format!(
@@ -223,7 +227,12 @@ impl RecordingHealth {
     fn set_identity_changed(&mut self, changed: bool) {
         self.identity_changed = changed;
         if changed {
-            self.warnings.push("The app executable changed while this process was running. macOS privacy permissions may have changed and capture may be incomplete. Avoid replacing the app during recording; stable Developer ID signing is needed to prevent ad-hoc identity changes.".to_owned());
+            let warning = if cfg!(target_os = "windows") {
+                "The app executable changed while this process was running. Avoid replacing the app during recording; finish this session before updating."
+            } else {
+                "The app executable changed while this process was running. macOS privacy permissions may have changed and capture may be incomplete. Avoid replacing the app during recording; stable Developer ID signing is needed to prevent ad-hoc identity changes."
+            };
+            self.warnings.push(warning.to_owned());
         }
     }
 }
@@ -275,7 +284,7 @@ impl ExecutableIdentity {
 #[derive(Default)]
 struct RecordingSlot {
     session_id: Option<String>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     recording: Option<native::NativeRecording>,
 }
 
@@ -352,7 +361,7 @@ impl Recorder {
         let mut slot = self.lock_slot()?;
         slot.reserve(session_id)?;
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         match native::NativeRecording::start(system_path, microphone_path, segmented) {
             Ok(recording) => slot.recording = Some(recording),
             Err(error) => {
@@ -361,13 +370,13 @@ impl Recorder {
             }
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (system_path, microphone_path, segmented);
             slot.session_id = None;
             return Err(AppError::new(
                 "audio_capture_unsupported",
-                "System audio capture requires macOS 14.2 or newer",
+                "Audio capture requires macOS 14.2 or newer, or Windows 10 22H2 or newer",
             ));
         }
 
@@ -386,17 +395,17 @@ impl Recorder {
                 "Recording belongs to a different session",
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             slot.recording
                 .as_mut()
                 .ok_or_else(|| AppError::new("recorder_state", "Recording resources are missing"))?
                 .rotate()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         Err(AppError::new(
             "audio_capture_unsupported",
-            "System audio capture requires macOS",
+            "Audio capture requires macOS or Windows",
         ))
     }
 
@@ -409,7 +418,7 @@ impl Recorder {
             ));
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let result = match slot.recording.take() {
             Some(recording) => recording.stop(),
             None => Err(AppError::new(
@@ -418,10 +427,10 @@ impl Recorder {
             )),
         };
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let result = Err(AppError::new(
             "audio_capture_unsupported",
-            "System audio capture requires macOS 14.2 or newer",
+            "Audio capture requires macOS 14.2 or newer, or Windows 10 22H2 or newer",
         ));
 
         let result = result.map(|mut files: RecordingFiles| {
@@ -445,7 +454,7 @@ impl Recorder {
                 "Recording belongs to a different session",
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let recording = slot.recording.as_ref().ok_or_else(|| {
                 AppError::new("recorder_state", "Recording resources are missing")
@@ -454,10 +463,10 @@ impl Recorder {
             health.set_identity_changed(self.identity_changed());
             Ok(health)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         Err(AppError::new(
             "audio_capture_unsupported",
-            "System audio capture requires macOS 14.2 or newer",
+            "Audio capture requires macOS 14.2 or newer, or Windows 10 22H2 or newer",
         ))
     }
 
@@ -486,6 +495,15 @@ impl Default for Recorder {
         Self::new()
     }
 }
+
+#[cfg(target_os = "windows")]
+#[path = "recorder_windows.rs"]
+pub(crate) mod native;
+
+// Exercise queue, timestamps, and file finalization without opening any audio device.
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "recorder_windows.rs"]
+mod windows_recording_tests;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod native {

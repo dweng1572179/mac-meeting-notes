@@ -57,10 +57,10 @@
         </li>
       {/each}
     </ol>
-  {:else if starters.length && !state.question && !state.asking}
+  {:else if starters.length}
     <ul class="question-starters" aria-label="Suggested questions">
       {#each starters as starter}
-        <li><button type="button" onclick={() => chooseStarter(starter)}>{starter}</button></li>
+        <li><button type="button" disabled={state.asking} onclick={() => chooseStarter(starter)}>{starter}</button></li>
       {/each}
     </ul>
   {/if}
@@ -68,6 +68,10 @@
   <QuestionComposer bind:this={composer} {id} question={state.question} asking={state.asking} {hasApiKey}
     placeholder={state.exchanges.length ? 'Ask a follow-up…' : 'Ask a question…'}
     onAsk={ask} onInput={(question) => conversation.edit(question)} />
+  {#if state.exchanges.length}
+    <button class="new-conversation" type="button" disabled={state.asking}
+      onclick={() => { conversation.clear(); composer.focus(); }}>New conversation</button>
+  {/if}
   {#if state.error}
     <div class="question-error" role="alert">
       <p>{state.error}</p>
@@ -94,9 +98,13 @@
   blockquote { margin: 5px 0 0; padding-inline-start: 12px; border-inline-start: 1px solid var(--line); line-height: 1.6; overflow-wrap: anywhere; }
   .question-starters { display: grid; gap: 3px; padding: 0; margin: 0 0 16px; list-style: none; }
   .question-starters button { padding: 5px 0; border: 0; background: transparent; color: var(--muted-text); text-align: start; font-size: 13px; line-height: 1.5; cursor: pointer; }
-  .question-starters button:hover { color: var(--accent-text); text-decoration: underline; text-underline-offset: 4px; }
+  .question-starters button:hover:not(:disabled) { color: var(--accent-text); text-decoration: underline; text-underline-offset: 4px; }
+  .question-starters button:disabled { opacity: .5; cursor: default; }
   .question-error { margin-top: 8px; color: var(--danger); font-size: 12px; line-height: 1.6; }
   .question-error p { margin: 0; overflow-wrap: anywhere; }
   .question-error button { margin-top: 5px; padding: 4px 0; border: 0; background: transparent; color: var(--ink); font-size: 12px; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
   .question-error button:disabled { opacity: .5; cursor: default; }
+  .new-conversation { margin-top: 4px; padding: 4px 0; border: 0; background: transparent; color: var(--muted-text); font-size: 12px; cursor: pointer; }
+  .new-conversation:hover:not(:disabled) { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+  .new-conversation:disabled { opacity: .5; cursor: default; }
 </style>

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createQuestionConversation } from './questions';
-import type { MeetingAnswer } from './types';
+import { boundedQuestionHistory, createQuestionConversation } from './questions';
+import type { MeetingAnswer, MeetingQuestionTurn } from './types';
 
 const answer = (text: string): MeetingAnswer => ({ answer: text, citations: [] });
 const deferred = () => {
@@ -11,6 +11,29 @@ const deferred = () => {
 };
 
 describe('question conversation', () => {
+  it('keeps the full received answer visible while shortening only follow-up context', async () => {
+    const conversation = createQuestionConversation();
+    const longAnswer = '🌊'.repeat(13_000);
+    conversation.edit('Explain the water cycle.');
+    await conversation.ask(async () => answer(longAnswer));
+    conversation.edit('Explain the second part.');
+    const request = vi.fn(async (_question: string, _history: MeetingQuestionTurn[]) => answer('A shorter explanation.'));
+    await conversation.ask(request);
+    const history = request.mock.calls[0][1];
+    expect(Array.from(history[0].answer).length).toBeLessThanOrEqual(6_000);
+    expect(history[0].answer).toContain('[Earlier answer shortened for context]');
+    expect(conversation.state.exchanges[0].answer.answer).toBe(longAnswer);
+  });
+
+  it('drops oldest turns to respect the UTF-8 context budget without splitting Unicode characters', () => {
+    const history = Array.from({ length: 4 }, (_, i) => ({ question: `Question ${i}`, answer: '🌊'.repeat(6_000) }));
+    const bounded = boundedQuestionHistory(history);
+    const bytes = bounded.reduce((sum, turn) => sum + new TextEncoder().encode(turn.question + turn.answer).length, 0);
+    expect(bytes).toBeLessThanOrEqual(60_000);
+    expect(bounded.map((turn) => turn.question)).toEqual(['Question 2', 'Question 3']);
+    expect(bounded.every((turn) => turn.answer === '🌊'.repeat(6_000))).toBe(true);
+  });
+
   it('starts a new conversation without erasing the draft, and cannot clear an active request', async () => {
     const conversation = createQuestionConversation();
     conversation.edit('An earlier question');

@@ -33,6 +33,9 @@ impl Writer {
     }
 
     pub(crate) fn finish(mut self) -> AppResult<()> {
+        if self.file.metadata().map_err(io_error)?.len() != 44 + u64::from(self.bytes) {
+            return Err(invalid("A partial disk write left this WAV unfinished. The audio was kept."));
+        }
         let mut header = Vec::with_capacity(44);
         header.extend_from_slice(b"RIFF");
         header.extend_from_slice(&(36 + self.bytes).to_le_bytes());
@@ -206,6 +209,20 @@ mod tests {
         let empty = directory.0.join("empty.wav");
         Writer::create(&empty, 16_000).unwrap().finish().unwrap();
         assert_eq!(inspect_bytes(&fs::read(empty).unwrap()).unwrap().frames, 0);
+    }
+
+    #[test]
+    fn partial_disk_write_is_retained_without_publishing_a_valid_header() {
+        let directory = Directory::new();
+        let input = directory.0.join("partial.wav");
+        let mut writer = Writer::create(&input, 16_000).unwrap();
+        writer.write_pcm(&[1, 0]).unwrap();
+        // Emulate write_all accepting a prefix before a disk error.
+        writer.file.write_all(&[2]).unwrap();
+        assert!(writer.finish().is_err());
+        let bytes = fs::read(input).unwrap();
+        assert_eq!(&bytes[44..], &[1, 0, 2]);
+        assert!(inspect_bytes(&bytes).is_err());
     }
 
     #[test]
