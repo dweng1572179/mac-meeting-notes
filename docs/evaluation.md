@@ -269,3 +269,14 @@ The native IOKit sleep-protection regression first failed because no assertion e
 All-target Clippy passed with warnings denied; formatting and diff checks passed.
 
 This is accelerated synthetic AAC capture/rotation coverage, not a 110-minute wall-clock microphone test or a classroom intelligibility benchmark. The production microphone is selected at Start and is not automatically rebound. Power protection permits display sleep but cannot prevent lid-close, explicit Sleep or depleted-battery sleep; see [Apple's assertion documentation](https://developer.apple.com/documentation/iokit/kiopmassertiontypepreventuseridlesystemsleep).
+
+
+### Published artifact and installation — v0.4.5
+
+[Release v0.4.5](https://github.com/dweng1572179/mac-meeting-notes/releases/tag/v0.4.5) was built from `3362e666db1c146060bc7d3f3b6fb6d86d626f76`. [Release run 35800778602](https://github.com/dweng1572179/mac-meeting-notes/actions/runs/35800778602) passed frontend tests/type checks, Rust tests, all-target Clippy, the production build, packaging regression and mounted signature/entitlement verification.
+
+- DMG: 6,183,591 bytes; GitHub asset SHA-256 `b16153c37094d3ee73ad740427e4f1b3897f28c328e93a6b8e99a3d41cf4aa29`, matched after download.
+- Installed version: 0.4.5; every bundle file matched the public artifact. Executable SHA-256 `dacf13afa9a11ebbe2b5834170f31853a4d8a751bcdf90098978241c4a148e1a`. Installation occurred only after confirming no active capture/processing and quitting the app.
+- Installed-app synthetic check: recorded, stopped, transcribed system speech about binary search, generated visible notes, and reopened the original library. macOS reported the app's idle-sleep assertion while recording and none after Stop.
+- Built-in microphone delivered 1,881,088 frames at 48 kHz (39.19 seconds) without write errors. The 42.05-second native clock includes setup. The speakers were muted, so playback did not establish microphone speech recognition; the microphone transcript was empty. This is not an acoustic classroom-quality acceptance claim. Sound settings were left unchanged.
+- All three original meeting JSON files remained byte-identical. The disposable synthetic meeting was removed after completion; no original meeting was reprocessed. A separate blank note was left ready for the user's class.
