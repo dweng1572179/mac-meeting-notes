@@ -297,3 +297,100 @@ fn failed_preparation_does_not_poison_the_next_rotation() {
     assert!((recovered[0].duration_seconds - 2.0).abs() < 0.001);
     assert_eq!(recording.health().unwrap().system.written_frames, 32_000);
 }
+
+#[test]
+#[ignore = "Offline native AAC stress: encodes 110 accelerated minutes on each source; run explicitly"]
+fn accelerated_110_minute_two_source_rotation_preserves_every_frame() {
+    const MINUTES: u64 = 110;
+    const FRAMES_PER_MINUTE: u64 = 16_000 * 60;
+    let directory = Directory::new();
+    let mut recording = recording(&directory);
+    // Reuse one second of PCM per source instead of computing 211 million sine samples.
+    let mut tones = [300.0, 600.0].map(|frequency| {
+        (0..16_000)
+            .map(|frame| {
+                (std::f64::consts::TAU * frequency * frame as f64 / 16_000.0).sin() as f32 * 0.3
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut section_counts = [0u64; 2];
+    let mut finalized_frames = [0u64; 2];
+    for minute in 0..MINUTES {
+        for _ in 0..60 {
+            for offset in (0..16_000).step_by(1024) {
+                for (callback, samples) in [
+                    recording.callback.as_ref().unwrap(),
+                    recording.microphone_callback.as_ref().unwrap(),
+                ]
+                .into_iter()
+                .zip(tones.iter_mut())
+                {
+                    let samples = &mut samples[offset..(offset + 1024).min(16_000)];
+                    let buffers = AudioBufferList {
+                        mNumberBuffers: 1,
+                        mBuffers: [AudioBuffer {
+                            mNumberChannels: 1,
+                            mDataByteSize: samples.len() as u32 * 4,
+                            mData: samples.as_mut_ptr().cast(),
+                        }],
+                    };
+                    // SAFETY: reusable PCM remains alive and matches the fixture's mono float format.
+                    unsafe { write_input(callback, &buffers) };
+                }
+            }
+            // Give native async encoders time to drain while remaining roughly 200x accelerated.
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let sections = recording.rotate().unwrap();
+        assert_eq!(
+            sections.len(),
+            2,
+            "minute {minute}: both sources must finalize; health: {:?}",
+            recording.health().unwrap()
+        );
+        for section in sections {
+            let source = match section.source {
+                AudioSource::System => 0,
+                AudioSource::Microphone => 1,
+            };
+            assert_eq!(section.index, minute);
+            assert!((section.start_seconds - minute as f64 * 60.0).abs() < 0.000_001);
+            assert!((section.duration_seconds - 60.0).abs() < 0.000_001);
+            let info = crate::audio::inspect(&section.path).unwrap();
+            assert_eq!(info.sample_rate, 16_000.0);
+            assert_eq!(info.frames, FRAMES_PER_MINUTE);
+            if matches!(minute, 0 | 54 | 109) {
+                let (frames, frequency, rms) = crate::audio::tests::decoded_tone(&section.path);
+                assert_eq!(frames, FRAMES_PER_MINUTE);
+                assert!((frequency - [300.0, 600.0][source]).abs() < 5.0);
+                assert!(rms > 0.1 && rms < 0.4);
+            }
+            section_counts[source] += 1;
+            finalized_frames[source] += info.frames;
+            // Keep only the active files; Directory also cleans up on any assertion failure.
+            fs::remove_file(section.path).unwrap();
+        }
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 2);
+    }
+    let files = recording.stop().unwrap();
+    assert!(files.segmented);
+    assert!(
+        files.segments.is_empty(),
+        "stop must not republish finalized sections or empty tails"
+    );
+    assert_eq!(section_counts, [MINUTES; 2]);
+    assert_eq!(finalized_frames, [MINUTES * FRAMES_PER_MINUTE; 2]);
+    let health = files.health.unwrap();
+    for source in [health.system, health.microphone] {
+        assert_eq!(source.admitted_frames, MINUTES * FRAMES_PER_MINUTE);
+        assert_eq!(source.written_frames, MINUTES * FRAMES_PER_MINUTE);
+        assert_eq!(source.write_error, None);
+        assert!((source.captured_seconds - 6_600.0).abs() < 0.000_001);
+    }
+    for entry in fs::read_dir(&directory.0).unwrap() {
+        let path = entry.unwrap().path();
+        assert_eq!(crate::audio::inspect(&path).unwrap().frames, 0);
+        fs::remove_file(path).unwrap();
+    }
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
+}

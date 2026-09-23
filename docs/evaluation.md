@@ -258,3 +258,14 @@ See [the full audit](reliability-audit-2026-09-22.md) for reproduced failures, c
 - Fresh session checks found no active recording/processing before graceful quit and replacement. The app reopened the saved library, notes and transcript successfully.
 - All three existing meeting JSON files remained byte-for-byte unchanged. No saved meeting was reprocessed.
 - Temporary build caches, browser/dev sessions, installation staging and the previous app backup were cleaned. One verified current DMG remains in Downloads.
+
+
+### Class-length capture readiness — v0.4.5
+
+The native IOKit sleep-protection regression first failed because no assertion existed, then passed after the fix. It queries the real macOS assertion properties and confirms release after Stop, setup failure and Drop (including repeated cleanup). No microphone access is required by this test.
+
+`cargo test --manifest-path src-tauri/Cargo.toml` passed 156 ordinary Rust tests. The explicitly run `cargo test --manifest-path src-tauri/Cargo.toml --lib accelerated_110_minute -- --ignored --nocapture --test-threads=1` passed in 43.38 seconds: 110 sections per source, 105,600,000 exact admitted/written/decoded-file frames per source at 16 kHz, native tone decoding at the beginning/middle/end, and no duplicate or empty final tails. The fixture uses 1,024-frame callbacks with modest pacing; an initial unpaced oversized-buffer fixture exceeded the asynchronous encoder queue and was corrected before relying on its result. It retains only active files and cleans its temporary directory.
+
+All-target Clippy passed with warnings denied; formatting and diff checks passed.
+
+This is accelerated synthetic AAC capture/rotation coverage, not a 110-minute wall-clock microphone test or a classroom intelligibility benchmark. The production microphone is selected at Start and is not automatically rebound. Power protection permits display sleep but cannot prevent lid-close, explicit Sleep or depleted-battery sleep; see [Apple's assertion documentation](https://developer.apple.com/documentation/iokit/kiopmassertiontypepreventuseridlesystemsleep).
