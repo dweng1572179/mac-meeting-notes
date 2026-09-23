@@ -12,10 +12,10 @@ fn older_section_registered_during_upload_does_not_move_newer_checkpoint() {
     let duration = info.frames as f64 / info.sample_rate;
     let store = SessionStore::new(fixture.root.clone());
     let older_path = store
-        .segment_path(&fixture.id, AudioSource::System, 0)
+        .segment_path(&fixture.id, AudioSource::System, 0, AudioFormat::Wav)
         .unwrap();
     let newer_path = store
-        .segment_path(&fixture.id, AudioSource::System, 1)
+        .segment_path(&fixture.id, AudioSource::System, 1, AudioFormat::Wav)
         .unwrap();
     fs::copy(&input, &older_path).unwrap();
     fs::rename(input, &newer_path).unwrap();
@@ -108,7 +108,7 @@ fn stopped_capture_recovers_unregistered_final_tail_once_and_keeps_audio() {
     let state = fixture.state("http://127.0.0.1:1/v1");
     let path = state
         .store
-        .segment_path(&fixture.id, AudioSource::System, 1)
+        .segment_path(&fixture.id, AudioSource::System, 1, AudioFormat::Wav)
         .unwrap();
     fs::rename(input, &path).unwrap();
     let mut session = state.store.get(&fixture.id).unwrap();
@@ -133,6 +133,7 @@ fn stopped_capture_recovers_unregistered_final_tail_once_and_keeps_audio() {
     }];
     state.store.save(&session).unwrap();
     let recovered = reconcile_segments(&state, &fixture.id).unwrap();
+    assert_eq!(recovered.audio_format, AudioFormat::Wav);
     assert_eq!(recovered.capture_segments.len(), 2);
     assert_eq!(recovered.capture_segments[1].start_seconds, 60.0);
     assert!((recovered.capture_segments[1].duration_seconds - duration).abs() < 0.001);
@@ -181,13 +182,13 @@ fn failed_start_with_numbered_audio_is_durable_and_retryable() {
     let state = fixture.state("http://127.0.0.1:1/v1");
     let tail = state
         .store
-        .segment_path(&fixture.id, AudioSource::System, 0)
+        .segment_path(&fixture.id, AudioSource::System, 0, AudioFormat::Wav)
         .unwrap();
     fs::rename(&input, &tail).unwrap();
     let microphone = fixture
         .root
         .join("audio")
-        .join(format!("{}-mic.m4a", fixture.id));
+        .join(format!("{}-mic.wav", fixture.id));
     let mut session = state.store.get(&fixture.id).unwrap();
     session.status = SessionStatus::Draft;
     session.segmented_capture = true;
@@ -219,11 +220,11 @@ fn corrupt_final_tail_does_not_prevent_checkpointing_healthy_section() {
     let state = fixture.state(&url);
     let good = state
         .store
-        .segment_path(&fixture.id, AudioSource::System, 0)
+        .segment_path(&fixture.id, AudioSource::System, 0, AudioFormat::Wav)
         .unwrap();
     let corrupt = state
         .store
-        .segment_path(&fixture.id, AudioSource::System, 1)
+        .segment_path(&fixture.id, AudioSource::System, 1, AudioFormat::Wav)
         .unwrap();
     fs::rename(input, &good).unwrap();
     fs::write(&corrupt, b"unfinished final container").unwrap();
@@ -263,11 +264,11 @@ fn corrupt_registered_section_does_not_block_healthy_other_source() {
     let state = fixture.state(&url);
     let corrupt = state
         .store
-        .segment_path(&fixture.id, AudioSource::System, 0)
+        .segment_path(&fixture.id, AudioSource::System, 0, AudioFormat::Wav)
         .unwrap();
     let good = state
         .store
-        .segment_path(&fixture.id, AudioSource::Microphone, 0)
+        .segment_path(&fixture.id, AudioSource::Microphone, 0, AudioFormat::Wav)
         .unwrap();
     fs::write(&corrupt, b"registered but unreadable audio").unwrap();
     fs::rename(input, &good).unwrap();
@@ -319,6 +320,7 @@ fn corrupt_registered_section_does_not_block_healthy_other_source() {
     assert_eq!(saved.original_notes, session.original_notes);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Uses paid OpenAI diarization/enrichment and authorized login Keychain access"]
 fn live_synthetic_segmented_diarization_with_openai() {
@@ -354,6 +356,7 @@ fn live_synthetic_segmented_diarization_with_openai() {
     let mut state = fixture.state("https://api.openai.com/v1");
     state.openai = OpenAiClient::new();
     let mut session = state.store.get(&fixture.id).unwrap();
+    session.audio_format = AudioFormat::M4a;
     session.status = SessionStatus::Recording;
     session.segmented_capture = true;
     session.transcription_settings = crate::domain::TranscriptionSettings::new_recording_default();
@@ -368,7 +371,7 @@ fn live_synthetic_segmented_diarization_with_openai() {
         let length = (duration - start).min(60.0);
         let path = state
             .store
-            .segment_path(&fixture.id, AudioSource::System, index)
+            .segment_path(&fixture.id, AudioSource::System, index, AudioFormat::M4a)
             .unwrap();
         crate::audio::write_chunk(&audio, &path, start, length).unwrap();
         sections.push(CapturedSegment {
@@ -487,7 +490,10 @@ fn segmented_silent_microphone_adds_warning_without_losing_system_notes() {
         (AudioSource::Microphone, microphone),
     ] {
         let info = crate::audio::inspect(&input).unwrap();
-        let path = state.store.segment_path(&fixture.id, source, 0).unwrap();
+        let path = state
+            .store
+            .segment_path(&fixture.id, source, 0, AudioFormat::Wav)
+            .unwrap();
         fs::rename(input, &path).unwrap();
         sections.push(CapturedSegment {
             source,
@@ -558,7 +564,7 @@ fn rejected_section_does_not_block_later_checkpoints_and_retry_only_uploads_miss
         .map(|index| {
             let path = state
                 .store
-                .segment_path(&fixture.id, AudioSource::System, index)
+                .segment_path(&fixture.id, AudioSource::System, index, AudioFormat::Wav)
                 .unwrap();
             fs::copy(&input, &path).unwrap();
             CapturedSegment {
@@ -603,12 +609,14 @@ fn rejected_section_does_not_block_later_checkpoints_and_retry_only_uploads_miss
     assert!(!segments[1].path.exists());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Uses paid OpenAI transcription/enrichment on synthetic Spanish/English speech"]
 fn live_bilingual_conversation_quality_with_openai() {
     let fixture = Fixture::new();
     let state = fixture.state("https://api.openai.com/v1");
     let mut session = state.store.get(&fixture.id).unwrap();
+    session.audio_format = AudioFormat::M4a;
     session.title = "[SIMULATION] Language practice".into();
     session.context = "Spanish and English language practice about food. Preserve concrete examples and unanswered questions; no project is being planned. Write the notes in English.".into();
     session.original_notes.clear();
@@ -625,7 +633,7 @@ fn live_bilingual_conversation_quality_with_openai() {
         let aiff = fixture.root.join(format!("voice-{index}.aiff"));
         fs::write(&script, speech).unwrap();
         assert!(std::process::Command::new("/usr/bin/say").args(["-v", voice, "-r", "160", "-f"]).arg(&script).arg("-o").arg(&aiff).output().unwrap().status.success());
-        let path = state.store.segment_path(&fixture.id, AudioSource::System, index).unwrap();
+        let path = state.store.segment_path(&fixture.id, AudioSource::System, index, AudioFormat::M4a).unwrap();
         assert!(std::process::Command::new("/usr/bin/afconvert").args(["-f", "m4af", "-d", "aac", "-b", "32000"]).arg(&aiff).arg(&path).output().unwrap().status.success());
         let info = crate::audio::inspect(&path).unwrap();
         let duration = info.frames as f64 / info.sample_rate;
@@ -715,7 +723,7 @@ fn worker_keeps_transcribing_new_sections_after_a_section_specific_rejection() {
         .map(|index| {
             let path = state
                 .store
-                .segment_path(&fixture.id, AudioSource::System, index)
+                .segment_path(&fixture.id, AudioSource::System, index, AudioFormat::Wav)
                 .unwrap();
             fs::copy(&input, &path).unwrap();
             CapturedSegment {

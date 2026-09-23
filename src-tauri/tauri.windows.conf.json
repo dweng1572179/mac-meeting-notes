@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "windows": {
+      "minimumWebview2Version": "123.0.0.0",
+      "nsis": { "installMode": "currentUser" }
+    }
+  }
+}

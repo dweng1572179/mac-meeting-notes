@@ -180,7 +180,7 @@
   </div>
 {:else if session.status === 'draft'}
   <div class="recording-readiness">
-    <p>Captures your microphone and Mac audio, and transcribes during the meeting. Connect your headphones before starting.</p>
+    <p>Captures your microphone and computer audio, and transcribes during the meeting. Connect your headphones before starting.</p>
     <div class="recording-dock draft">
       <button class="start-meeting" type="button" disabled={pending !== null} onclick={start}>
         <span aria-hidden="true"></span>

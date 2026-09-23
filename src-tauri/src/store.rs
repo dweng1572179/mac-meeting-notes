@@ -6,7 +6,9 @@ use std::{
 
 use chrono::{DateTime, FixedOffset};
 
-use crate::domain::{AppError, AppResult, AudioSource, Session, TranscriptionSettings};
+use crate::domain::{
+    AppError, AppResult, AudioFormat, AudioSource, Session, TranscriptionSettings,
+};
 
 pub struct SessionStore {
     root: PathBuf,
@@ -51,10 +53,10 @@ impl SessionStore {
         self.validate_id(&session.id)?;
         validate_transcription(session)?;
         if let Some(path) = session.audio_path.as_deref() {
-            self.validate_audio_path(&session.id, path)?;
+            self.validate_audio_path(&session.id, path, session.audio_format)?;
         }
         if let Some(path) = session.microphone_audio_path.as_deref() {
-            self.validate_microphone_audio_path(&session.id, path)?;
+            self.validate_microphone_audio_path(&session.id, path, session.audio_format)?;
         }
         let directory = self.sessions_dir()?;
         let json = serde_json::to_vec_pretty(session).map_err(json_error)?;
@@ -86,10 +88,10 @@ impl SessionStore {
     pub fn delete(&self, id: &str) -> AppResult<()> {
         let session = self.get(id)?;
         if let Some(path) = session.audio_path.as_deref() {
-            self.validate_audio_path(id, path)?;
+            self.validate_audio_path(id, path, session.audio_format)?;
         }
         if let Some(path) = session.microphone_audio_path.as_deref() {
-            self.validate_microphone_audio_path(id, path)?;
+            self.validate_microphone_audio_path(id, path, session.audio_format)?;
         }
 
         let sessions_directory = self.sessions_dir()?;
@@ -101,7 +103,7 @@ impl SessionStore {
                 "A prior meeting deletion still needs cleanup",
             ));
         }
-        fs::rename(session_path, &tombstone_path).map_err(io_error)?;
+        durable_rename(&session_path, &tombstone_path)?;
 
         if sync_directory(&sessions_directory).is_ok() {
             let _ = self.cleanup_deletion(id, &tombstone_path);
@@ -116,25 +118,39 @@ impl SessionStore {
         Ok(directory)
     }
 
-    pub(crate) fn audio_path(&self, id: &str) -> AppResult<PathBuf> {
-        let path = self.root.join("audio").join(format!("{id}.m4a"));
-        self.validate_audio_path(id, &path.to_string_lossy())
+    pub(crate) fn audio_path(&self, id: &str, format: AudioFormat) -> AppResult<PathBuf> {
+        let path = self
+            .root
+            .join("audio")
+            .join(format!("{id}.{}", format.extension()));
+        self.validate_audio_path(id, &path.to_string_lossy(), format)
     }
 
-    pub(crate) fn validate_audio_path(&self, id: &str, audio_path: &str) -> AppResult<PathBuf> {
-        self.validate_named_audio_path(id, audio_path, &format!("{id}.m4a"))
+    pub(crate) fn validate_audio_path(
+        &self,
+        id: &str,
+        audio_path: &str,
+        format: AudioFormat,
+    ) -> AppResult<PathBuf> {
+        self.validate_named_audio_path(id, audio_path, &format!("{id}.{}", format.extension()))
     }
 
     pub(crate) fn validate_microphone_audio_path(
         &self,
         id: &str,
         audio_path: &str,
+        format: AudioFormat,
     ) -> AppResult<PathBuf> {
-        self.validate_named_audio_path(id, audio_path, &format!("{id}-mic.m4a"))
+        self.validate_named_audio_path(id, audio_path, &format!("{id}-mic.{}", format.extension()))
     }
 
-    pub(crate) fn chunk_path(&self, id: &str, source: AudioSource) -> AppResult<PathBuf> {
-        let filename = format!("{id}-{}-chunk.m4a", source.filename());
+    pub(crate) fn chunk_path(
+        &self,
+        id: &str,
+        source: AudioSource,
+        format: AudioFormat,
+    ) -> AppResult<PathBuf> {
+        let filename = format!("{id}-{}-chunk.{}", source.filename(), format.extension());
         let path = self.root.join("audio").join(&filename);
         self.validate_named_audio_path(id, &path.to_string_lossy(), &filename)
     }
@@ -144,17 +160,26 @@ impl SessionStore {
         id: &str,
         source: AudioSource,
         index: u64,
+        format: AudioFormat,
     ) -> AppResult<PathBuf> {
         if index > 99_999_999 {
             return Err(invalid_audio_path());
         }
-        let filename = format!("{id}-{}-segment-{index:08}.m4a", source.filename());
+        let filename = format!(
+            "{id}-{}-segment-{index:08}.{}",
+            source.filename(),
+            format.extension()
+        );
         let path = self.root.join("audio").join(&filename);
         self.validate_named_audio_path(id, &path.to_string_lossy(), &filename)
     }
 
     // Only canonical names belong to this meeting. Never follow links during recovery or deletion.
-    pub(crate) fn segment_files(&self, id: &str) -> AppResult<Vec<(AudioSource, u64, PathBuf)>> {
+    pub(crate) fn segment_files(
+        &self,
+        id: &str,
+        format: AudioFormat,
+    ) -> AppResult<Vec<(AudioSource, u64, PathBuf)>> {
         self.validate_id(id)?;
         validate_directory(&self.root)?;
         let directory = self.root.join("audio");
@@ -173,7 +198,7 @@ impl SessionStore {
                 let prefix = format!("{id}-{}-segment-", source.filename());
                 let Some(index) = name
                     .strip_prefix(&prefix)
-                    .and_then(|name| name.strip_suffix(".m4a"))
+                    .and_then(|name| name.strip_suffix(&format!(".{}", format.extension())))
                 else {
                     continue;
                 };
@@ -181,7 +206,7 @@ impl SessionStore {
                     continue;
                 }
                 let index: u64 = index.parse().map_err(|_| invalid_audio_path())?;
-                files.push((source, index, self.segment_path(id, source, index)?));
+                files.push((source, index, self.segment_path(id, source, index, format)?));
             }
         }
         files.sort_by_key(|(source, index, _)| (source.filename(), *index));
@@ -251,22 +276,22 @@ impl SessionStore {
             session
                 .audio_path
                 .as_deref()
-                .map(|path| self.validate_audio_path(id, path)),
+                .map(|path| self.validate_audio_path(id, path, session.audio_format)),
             session
                 .microphone_audio_path
                 .as_deref()
-                .map(|path| self.validate_microphone_audio_path(id, path)),
+                .map(|path| self.validate_microphone_audio_path(id, path, session.audio_format)),
         ];
         let mut removed_audio = false;
         for audio_path in audio_paths
             .into_iter()
             .flatten()
             .chain([
-                self.chunk_path(id, AudioSource::System),
-                self.chunk_path(id, AudioSource::Microphone),
+                self.chunk_path(id, AudioSource::System, session.audio_format),
+                self.chunk_path(id, AudioSource::Microphone, session.audio_format),
             ])
             .chain(
-                self.segment_files(id)?
+                self.segment_files(id, session.audio_format)?
                     .into_iter()
                     .map(|(_, _, path)| Ok(path)),
             )
@@ -428,13 +453,52 @@ fn atomic_write(path: &Path, json: &[u8]) -> AppResult<()> {
         .map_err(io_error)?;
     temporary.write_all(json).map_err(io_error)?;
     temporary.sync_all().map_err(io_error)?;
-    fs::rename(temporary_path, path).map_err(io_error)?;
+    drop(temporary);
+    durable_rename(&temporary_path, path)?;
     sync_directory(directory)
+}
+
+#[cfg(not(windows))]
+fn durable_rename(from: &Path, to: &Path) -> AppResult<()> {
+    fs::rename(from, to).map_err(io_error)
+}
+
+#[cfg(windows)]
+fn durable_rename(from: &Path, to: &Path) -> AppResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        },
+    };
+    let wide = |path: &Path| -> AppResult<Vec<u16>> {
+        let mut value: Vec<_> = path.as_os_str().encode_wide().collect();
+        if value.contains(&0) {
+            return Err(io_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "File path contains NUL",
+            )));
+        }
+        value.push(0);
+        Ok(value)
+    };
+    let from = wide(from)?;
+    let to = wide(to)?;
+    // SAFETY: both owned UTF-16 paths are NUL-terminated and alive for this synchronous call.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| AppError::new("storage_error", error.to_string()))
 }
 
 fn validate_directory(path: &Path) -> AppResult<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(metadata) if metadata.is_dir() && !is_reparse_point(&metadata) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(io_error(error)),
         _ => Err(AppError::new(
@@ -446,13 +510,26 @@ fn validate_directory(path: &Path) -> AppResult<()> {
 
 fn validate_file(path: &Path) -> AppResult<bool> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(metadata) if metadata.is_file() && !is_reparse_point(&metadata) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(io_error(error)),
         _ => Err(AppError::new(
             "storage_error",
             "App data file must not be a symlink or directory",
         )),
+    }
+}
+
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
     }
 }
 
@@ -488,6 +565,43 @@ fn sync_directory(_directory: &Path) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    #[test]
+    fn atomic_replacement_preserves_prior_json_when_destination_is_invalid() {
+        let directory =
+            std::env::temp_dir().join(format!("meeting-atomic-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("session.json");
+        super::atomic_write(&path, b"old").unwrap();
+        super::atomic_write(&path, b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let blocked = directory.join("blocked.json");
+        fs::create_dir(&blocked).unwrap();
+        assert!(super::atomic_write(&blocked, b"replacement").is_err());
+        assert!(blocked.is_dir());
+        assert_eq!(fs::read(path).unwrap(), b"new");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_failed_atomic_replace_preserves_previous_checkpoint() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("meeting-locked-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("session.json");
+        super::atomic_write(&path, b"prior checkpoint").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(super::atomic_write(&path, b"must not replace").is_err());
+        drop(held);
+        assert_eq!(fs::read(path).unwrap(), b"prior checkpoint");
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn sync_directory_succeeds_after_atomic_rename() {

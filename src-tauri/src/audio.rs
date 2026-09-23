@@ -2,6 +2,9 @@ use std::path::Path;
 
 use crate::domain::{AppError, AppResult};
 
+#[path = "audio_wav.rs"]
+pub(crate) mod wav;
+
 #[derive(Debug, Clone, Copy)]
 pub struct AudioInfo {
     pub frames: u64,
@@ -9,6 +12,9 @@ pub struct AudioInfo {
 }
 
 pub fn inspect(path: &Path) -> AppResult<AudioInfo> {
+    if path.extension().is_some_and(|extension| extension == "wav") {
+        return wav::inspect(path);
+    }
     #[cfg(target_os = "macos")]
     {
         let file = native::AudioFile::open(path)?;
@@ -21,12 +27,12 @@ pub fn inspect(path: &Path) -> AppResult<AudioInfo> {
         let _ = path;
         Err(AppError::new(
             "audio_chunk",
-            "Audio decoding requires macOS",
+            "This retained audio format can only be decoded on a Mac",
         ))
     }
 }
 
-/// Create one independently finalized, at most five-minute M4A. Existing outputs
+/// Create one independently finalized, at most five-minute audio file. Existing outputs
 /// are refused, including aliases of the source; callers own stale scratch cleanup.
 pub fn write_chunk(
     input: &Path,
@@ -45,6 +51,9 @@ pub fn write_chunk(
             "Invalid audio chunk time range",
         ));
     }
+    if output.extension().is_some_and(|extension| extension == "wav") {
+        return wav::write_chunk(input, output, start_seconds, duration_seconds);
+    }
     #[cfg(target_os = "macos")]
     {
         native::write_chunk(input, output, start_seconds, duration_seconds)
@@ -54,7 +63,7 @@ pub fn write_chunk(
         let _ = (input, output);
         Err(AppError::new(
             "audio_chunk",
-            "Audio decoding requires macOS",
+            "This retained audio format can only be decoded on a Mac",
         ))
     }
 }

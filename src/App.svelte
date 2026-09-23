@@ -172,7 +172,7 @@
           <div role="alert">
             {#if healthError}<p>{healthError}</p>{/if}
             {#each health?.warnings ?? [] as warning}<p>{warning}</p>{/each}
-            <p>A quiet source may produce no frames. If speech is expected, check your selected microphone and macOS audio permissions. Stop recording before updating the app.</p>
+            <p>A quiet source may produce no frames. If speech is expected, check your selected microphone and system audio permissions. Stop recording before updating the app.</p>
           </div>
         {/if}
         {#if selectedId !== recordingId}

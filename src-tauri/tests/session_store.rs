@@ -2,6 +2,107 @@ use meeting_notes_lib::domain::{CreateSessionInput, Session, UpdateSessionInput}
 use meeting_notes_lib::store::SessionStore;
 
 #[test]
+fn historical_sessions_default_to_m4a_and_wav_paths_remain_format_scoped() {
+    use meeting_notes_lib::domain::AudioFormat;
+    let root = std::env::temp_dir().join(format!("meeting-format-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Portable recording".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    let mut legacy = serde_json::to_value(&session).unwrap();
+    legacy.as_object_mut().unwrap().remove("audioFormat");
+    assert_eq!(
+        serde_json::from_value::<Session>(legacy)
+            .unwrap()
+            .audio_format,
+        AudioFormat::M4a
+    );
+    session.audio_format = AudioFormat::Wav;
+    std::fs::create_dir_all(root.join("audio")).unwrap();
+    let owned = root
+        .join("audio")
+        .join(format!("{}-system-segment-00000000.wav", session.id));
+    let other_format = owned.with_extension("m4a");
+    let foreign = root.join("audio").join("other-system-segment-00000000.wav");
+    let malformed = root
+        .join("audio")
+        .join(format!("{}-system-segment-other.wav", session.id));
+    for path in [&owned, &other_format, &foreign, &malformed] {
+        std::fs::write(path, "retained fixture").unwrap();
+    }
+    let base = root.join("audio").join(format!("{}.wav", session.id));
+    session.audio_path = Some(base.to_string_lossy().into_owned());
+    store.save(&session).unwrap();
+    assert_eq!(
+        store.get(&session.id).unwrap().audio_format,
+        AudioFormat::Wav
+    );
+    let mut invalid = session.clone();
+    invalid.audio_path = Some(base.with_extension("m4a").to_string_lossy().into_owned());
+    assert_eq!(store.save(&invalid).unwrap_err().code, "invalid_audio_path");
+    invalid.audio_path = Some(foreign.to_string_lossy().into_owned());
+    assert_eq!(store.save(&invalid).unwrap_err().code, "invalid_audio_path");
+    store.delete(&session.id).unwrap();
+    assert!(!owned.exists());
+    assert!(other_format.exists());
+    assert!(foreign.exists());
+    assert!(malformed.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_audio_junction_cannot_redirect_save_or_deletion() {
+    use meeting_notes_lib::domain::AudioFormat;
+    let root = std::env::temp_dir().join(format!("meeting-junction-{}", uuid::Uuid::new_v4()));
+    let outside = root.with_extension("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Junction safety".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    session.audio_format = AudioFormat::Wav;
+    store.save(&session).unwrap();
+    let link = root.join("audio");
+    let status = std::process::Command::new("cmd.exe")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(&outside)
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "cannot create disposable junction: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let victim = outside.join(format!("{}.wav", session.id));
+    std::fs::write(&victim, "must remain").unwrap();
+    session.audio_path = Some(
+        link.join(format!("{}.wav", session.id))
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert_eq!(store.save(&session).unwrap_err().code, "invalid_audio_path");
+    std::fs::write(
+        root.join("sessions").join(format!("{}.json", session.id)),
+        serde_json::to_vec(&session).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        store.delete(&session.id).unwrap_err().code,
+        "invalid_audio_path"
+    );
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "must remain");
+    std::fs::remove_dir(link).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
 fn new_recording_defaults_do_not_change_legacy_session_recognition() {
     let root = std::env::temp_dir().join(format!("meeting-notes-{}", uuid::Uuid::new_v4()));
     let store = SessionStore::new(root.clone());

@@ -1,0 +1,44 @@
+name: Windows
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm test -- --run
+      - run: npm run check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - run: npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
+          Copy-Item $installers[0].FullName Meeting-Notes-Setup.exe
+      - name: First-install and application launch smoke test
+        shell: pwsh
+        run: ./scripts/check-windows-installer.ps1 -Installer ./Meeting-Notes-Setup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: Meeting-Notes-Setup.exe
+          if-no-files-found: error
+          retention-days: 7

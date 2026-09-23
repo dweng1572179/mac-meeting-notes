@@ -5,6 +5,7 @@ import type {
   Bootstrap,
   CreateSessionInput,
   MeetingAnswer,
+  MeetingQuestionTurn,
   RecordingInfo,
   RecordingHealth,
   Session,
@@ -272,9 +273,9 @@ export async function saveTranscriptionSettings(settings: TranscriptionSettings)
   return invoke<TranscriptionSettings>('save_transcription_settings', { settings });
 }
 
-export async function askMeeting(id: string, question: string): Promise<MeetingAnswer> {
-  if (!isNative()) return askMeetings(null, question);
-  return invoke<MeetingAnswer>('ask_meetings', { folder: null, sessionId: id, question });
+export async function askMeeting(id: string, question: string, history?: MeetingQuestionTurn[]): Promise<MeetingAnswer> {
+  if (!isNative()) return askMeetings(null, question, history);
+  return invoke<MeetingAnswer>('ask_meetings', { folder: null, sessionId: id, question, ...(history ? { history: history.slice(-4) } : {}) });
 }
 
 export async function exportMarkdown(title: string, markdown: string): Promise<string> {
@@ -290,7 +291,7 @@ export async function exportMarkdown(title: string, markdown: string): Promise<s
   return invoke<string>('export_markdown', { title, markdown });
 }
 
-export async function askMeetings(folder: string | null, question: string): Promise<MeetingAnswer> {
+export async function askMeetings(folder: string | null, question: string, history?: MeetingQuestionTurn[]): Promise<MeetingAnswer> {
   if (!isNative()) {
     await previewDelay();
     const source = previewSession ?? previewState();
@@ -305,7 +306,7 @@ export async function askMeetings(folder: string | null, question: string): Prom
       ]
     };
   }
-  return invoke<MeetingAnswer>('ask_meetings', { folder, question });
+  return invoke<MeetingAnswer>('ask_meetings', { folder, question, ...(history ? { history: history.slice(-4) } : {}) });
 }
 
 export function disposeAsyncListener(registration: Promise<UnlistenFn>): UnlistenFn {

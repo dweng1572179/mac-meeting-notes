@@ -94,6 +94,21 @@ test('capture health requests the active session and preserves source warnings',
   }
 });
 
+test('question history preserves native scope and includes only the latest four turns', async () => {
+  globalThis.window = {};
+  const requests = [];
+  const history = Array.from({ length: 6 }, (_, i) => ({ question: `Question ${i}`, answer: `Answer ${i}` }));
+  mockIPC((command, payload) => { requests.push({ command, payload }); return { answer: 'Synthetic answer', citations: [] }; });
+  try {
+    await api.askMeeting('exact-id', 'Explain that.', history);
+    await api.askMeetings('Course notes', 'Compare those ideas.', history);
+    assert.deepEqual(requests, [
+      { command: 'ask_meetings', payload: { folder: null, sessionId: 'exact-id', question: 'Explain that.', history: history.slice(-4) } },
+      { command: 'ask_meetings', payload: { folder: 'Course notes', question: 'Compare those ideas.', history: history.slice(-4) } }
+    ]);
+  } finally { delete globalThis.window; }
+});
+
 test('single-meeting questions and settings preserve their native scope and values', async () => {
   globalThis.window = {};
   const settings = { language: 'en', vocabulary: 'Darryl, São Paulo', model: 'gpt-4o-transcribe' };

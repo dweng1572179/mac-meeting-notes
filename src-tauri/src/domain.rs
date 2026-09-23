@@ -95,6 +95,8 @@ pub struct Session {
     pub error: Option<AppError>,
     pub audio_path: Option<String>,
     #[serde(default)]
+    pub audio_format: AudioFormat,
+    #[serde(default)]
     pub microphone_audio_path: Option<String>,
     #[serde(default)]
     pub transcription: Vec<SourceTranscript>,
@@ -123,6 +125,24 @@ pub struct Session {
 pub enum AudioSource {
     System,
     Microphone,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioFormat {
+    #[default]
+    M4a,
+    Wav,
+}
+
+impl AudioFormat {
+    pub fn extension(self) -> &'static str {
+        match self { Self::M4a => "m4a", Self::Wav => "wav" }
+    }
+
+    pub fn for_recording() -> Self {
+        if cfg!(target_os = "windows") { Self::Wav } else { Self::M4a }
+    }
 }
 
 impl AudioSource {
@@ -191,6 +211,12 @@ pub struct MeetingAnswer {
     pub citations: Vec<MeetingCitation>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionTurn {
+    pub question: String,
+    pub answer: String,
+}
+
 pub type AppResult<T> = Result<T, AppError>;
 
 impl AppError {
@@ -225,6 +251,7 @@ impl Session {
             status: SessionStatus::Draft,
             error: None,
             audio_path: None,
+            audio_format: AudioFormat::M4a,
             microphone_audio_path: None,
             transcription: Vec::new(),
             transcription_settings: TranscriptionSettings::default(),

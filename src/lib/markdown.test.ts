@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { parseMeetingMarkdown, markdownInlines } from './markdown';
+import { parseAnswerMarkdown, parseMeetingMarkdown, markdownInlines } from './markdown';
+
+it('groups answer paragraphs and real lists without interpreting source HTML', () => {
+  expect(parseAnswerMarkdown('## Water cycle\n\nWater moves\nbetween states.\n\n- Evaporation\n* Condensation\n\n3. Observe\n4. Compare\n\n<img src=x>')).toEqual([
+    { kind: 'heading', text: 'Water cycle' },
+    { kind: 'paragraph', text: 'Water moves between states.' },
+    { kind: 'list', ordered: false, start: 1, items: ['Evaporation', 'Condensation'] },
+    { kind: 'list', ordered: true, start: 3, items: ['Observe', 'Compare'] },
+    { kind: 'paragraph', text: '<img src=x>' }
+  ]);
+});
 
 describe('parseMeetingMarkdown', () => {
   it('returns safe headings and bullets without interpreting HTML', () => {

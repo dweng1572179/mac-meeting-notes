@@ -130,10 +130,11 @@ pub(super) fn register_segments(
     id: &str,
     segments: &[CapturedSegment],
 ) -> AppResult<Session> {
+    let format = load_session(state, id)?.audio_format;
     for segment in segments {
         if state
             .store
-            .segment_path(id, segment.source, segment.index)?
+            .segment_path(id, segment.source, segment.index, format)?
             != segment.path
         {
             return Err(AppError::new(
@@ -149,7 +150,7 @@ pub(super) fn register_segments(
 pub(super) fn reconcile_segments(state: &AppState, id: &str) -> AppResult<Session> {
     let mut session = load_session(state, id)?;
     let mut first_error = None;
-    for (source, index, path) in state.store.segment_files(id)? {
+    for (source, index, path) in state.store.segment_files(id, session.audio_format)? {
         if session
             .capture_segments
             .iter()
@@ -253,8 +254,10 @@ pub(super) async fn transcribe_available(
                     "Captured section metadata is missing",
                 )
             })?;
-        let input = state.store.segment_path(id, source, segment_index)?;
-        let output = state.store.chunk_path(id, source)?;
+        let input = state
+            .store
+            .segment_path(id, source, segment_index, session.audio_format)?;
+        let output = state.store.chunk_path(id, source, session.audio_format)?;
         let start = chunk.start_seconds - section.start_seconds;
         let length = chunk.duration_seconds;
         remove_audio_file(output.clone())?;
@@ -404,6 +407,7 @@ pub(super) fn cleanup_checkpointed_segments(state: &AppState, session: &Session)
                 &session.id,
                 segment.source,
                 segment.index,
+                session.audio_format,
             )?)?;
         }
     }

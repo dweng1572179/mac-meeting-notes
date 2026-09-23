@@ -1,5 +1,6 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "windows"))]
 
+#[cfg(target_os = "macos")]
 #[link(name = "Security", kind = "framework")]
 extern "C" {
     fn SecKeychainSetUserInteractionAllowed(allowed: bool) -> i32;
@@ -16,11 +17,13 @@ fn disposable_credential_survives_fresh_entries() {
             let _ = keyring::Entry::new(&self.service, &self.account)
                 .and_then(|entry| entry.delete_credential());
             // SAFETY: restore the test process's normal Keychain interaction policy.
+            #[cfg(target_os = "macos")]
             unsafe { SecKeychainSetUserInteractionAllowed(true) };
         }
     }
 
     // SAFETY: prevents this disposable integration test from opening a permission prompt.
+    #[cfg(target_os = "macos")]
     assert_eq!(unsafe { SecKeychainSetUserInteractionAllowed(false) }, 0);
     let credential = Credential {
         service: format!("meeting-notes-disposable-test-{}", uuid::Uuid::new_v4()),

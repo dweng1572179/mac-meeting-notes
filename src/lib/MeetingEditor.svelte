@@ -46,7 +46,7 @@
   import { errorMessage } from './recovery';
   import RecordingDock, { captureCoverage } from './RecordingDock.svelte';
   import TranscriptView from './TranscriptView.svelte';
-  import type { RecordingHealth, Session } from './types';
+  import type { MeetingQuestionTurn, RecordingHealth, Session } from './types';
 
   let {
     session,
@@ -196,9 +196,9 @@
     return exportMarkdown(title || 'Untitled meeting', meetingMarkdown(currentSession()));
   }
 
-  async function askCurrentMeeting(question: string) {
+  async function askCurrentMeeting(question: string, history: MeetingQuestionTurn[]) {
     await flush();
-    return askMeeting(session.id, question);
+    return askMeeting(session.id, question, history);
   }
 
   async function changeSuggestion(key: SuggestionKey, action: 'apply' | 'dismiss') {
@@ -441,7 +441,7 @@
   </section>
 
   {#if session.status === 'complete' && session.transcript !== null}
-    <MeetingQuestion {hasApiKey} onAsk={askCurrentMeeting} {onOpenSettings} />
+    <MeetingQuestion {hasApiKey} onAsk={askCurrentMeeting} {onOpenSettings} topic={session.aiSuggestions?.topics.find((topic) => topic.evidence.length)?.title} />
   {/if}
 
 
