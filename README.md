@@ -19,6 +19,14 @@ A lightweight Mac and Windows meeting notepad that records your microphone and c
 - Answers meeting and library questions with saved-passage citations, readable formatted answers, copy, and expandable sources. Follow-ups include up to four prior turns to resolve references; current saved passages remain the evidence. Oversized source selections produce an explicit error.
 - Keeps a separate conversation for each meeting, folder, and the whole library. Full answers, citations, and drafts survive navigation and restart; a request can finish after you leave its view. An interrupted request requires an explicit retry instead of automatically repeating a paid call. Only follow-up request context is shortened. Starting a new conversation preserves your draft, and storage failures are visible.
 
+## Onboarding and settings
+
+No Meeting Notes account is required. First use offers local typed notes or optional recording/AI setup; existing libraries open normally. Settings separates AI credentials, recording defaults/permissions, privacy/data, and connection status. A locked credential store leaves local notes available. Removing a key clears only this computer’s saved credential and is blocked during recording/processing; it does not revoke the key or cancel requests already sent.
+
+Notes use compact expandable meeting details. Chat sits beside the document in wider windows and opens from a dock at smaller widths; its composer stays accessible while answers scroll.
+
+Google/Microsoft calendar connections and mailbox import are not implemented. See the [onboarding and integration guide](docs/onboarding-and-integrations.md) for the calendar-first security recommendation and provider registration requirements.
+
 ## Privacy
 
 Your API key stays in macOS Keychain or Windows Credential Manager. Meeting audio, transcripts, original notes, and the selected meeting sources used for a question are sent directly to OpenAI as needed; this app is not fully local or offline.
@@ -30,7 +38,7 @@ See OpenAI's [data controls](https://developers.openai.com/api/docs/guides/your-
 ## Requirements
 
 - Apple silicon Mac with macOS 14.2 or later, or an x64 Windows laptop/desktop (Windows 11 recommended; Windows 10 22H2 compatibility target).
-- OpenAI API key with paid API access; API usage is billed by OpenAI
+- Recording and AI: OpenAI API key with paid API access; API usage is billed separately from ChatGPT. Typed notes need no key.
 - Mac: Microphone and System Audio Recording permissions. Windows: microphone access for desktop apps and an available audio output device.
 - One-time unnotarized-app approval: right-click **Open** on macOS 14; **Open Anyway** in Privacy & Security on macOS 15 or later
 
@@ -48,7 +56,7 @@ Do not install development or interim builds. Release checksums are included as 
 1. Open `Meeting-Notes.dmg` and drag **Meeting Notes** to **Applications**.
 2. **Stop every recording and quit Meeting Notes before replacing or updating it.** If Meeting Notes already exists in Applications, choose **Replace**. Never choose **Keep Both**, which creates duplicate app copies.
 3. Approve the unnotarized beta once. On **macOS 14**, right-click **Meeting Notes**, choose **Open**, then confirm **Open**. On **macOS 15 or later**, first try opening Meeting Notes from Applications and dismiss the warning, then open **System Settings → Privacy & Security → Open Anyway** and confirm opening Meeting Notes.
-4. Add your OpenAI API key in the app's settings. On your first recording, grant both Microphone and System Audio Recording when macOS asks.
+4. Choose **Start with typed notes** to work locally, or **Set up recording & AI** to add your key. On your first recording, grant both Microphone and System Audio Recording when macOS asks.
 
 Future launches work normally from Applications. Updates to this ad-hoc signed beta change its privacy identity and may require granting audio permissions again. The app detects executable replacement while running and warns about possible capture loss; only stable Developer ID signing/notarization can address the underlying identity problem.
 
@@ -57,7 +65,7 @@ Future launches work normally from Applications. Updates to this ad-hoc signed b
 1. Download **Meeting-Notes-Setup.exe** from the latest release. Stop recording and quit Meeting Notes before any update.
 2. Run the installer. It installs for your Windows account and installs/updates Microsoft WebView2 if necessary. Internet access is needed for a missing runtime.
 3. This beta does not have an Authenticode signing certificate. If SmartScreen blocks it, verify it came from this repository and check its published SHA-256 before choosing **More info → Run anyway**, if that option is available. Managed laptops may require an administrator's approval.
-4. Open Meeting Notes and add your paid OpenAI API key in Settings. The key is saved in Windows Credential Manager.
+4. Open Meeting Notes and choose typed notes or optional AI setup. An AI key is saved in Windows Credential Manager. Manage it in **Settings → AI & API key**.
 5. In **Settings → Privacy & security → Microphone**, enable microphone access and **Let desktop apps access your microphone**. Select the microphone and default output device in Windows Sound settings before recording.
 6. For an in-person class, use the laptop microphone. For an online meeting in Edge, Chrome, Teams, or Zoom, play audio through the selected default Windows output device. Recording starts only when you press Record.
 
@@ -67,7 +75,7 @@ Windows uses native WASAPI and mono 16 kHz PCM WAV sections, without an FFmpeg d
 
 ## Language, accents, and terminology
 
-Open **Settings → Transcription** to choose automatic detection or a spoken language and one of these recognition modes:
+Open **Settings → Recording** to choose automatic detection or a spoken language and one of these recognition modes:
 
 - **Speaker detection** (`gpt-4o-transcribe-diarize`): timed speaker turns, with identities scoped to each source and uploaded section. It does not support vocabulary prompts; saved vocabulary is retained for text-only modes.
 - **Text only · lowest cost** (`gpt-4o-mini-transcribe`) or **Text only · higher accuracy** (`gpt-4o-transcribe`): plain transcription with optional names and terminology, up to 2,000 characters.
@@ -113,6 +121,8 @@ The installer is under `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/n
 The repeatable labeled simulation and expected results are in [`docs/evaluation.md`](docs/evaluation.md). The [September 22 reliability audit](docs/reliability-audit-2026-09-22.md) documents repeated failure causes, v0.4.4 fixes, verified cost estimates and remaining limits.
 
 ## Storage
+
+Notes and chats are not encrypted by the app. **Settings → Privacy & data** explains storage and opens the native data folder. Copying that folder alone does not back up separate WebView conversation storage.
 
 Meeting metadata, your notes, raw transcripts, generated AI notes, your AI-note edits, suggestions, and transcription progress are stored locally in the app's platform-specific application-data directory. The interface presents one editable Notes document. One previous document is retained for reversible restoration after enhancement; this is not unlimited version history.
 

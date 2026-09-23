@@ -28,6 +28,8 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::delete_session,
             commands::delete_transcript,
             commands::save_api_key,
+            commands::remove_api_key,
+            commands::open_settings_destination,
             commands::save_transcription_settings,
             commands::export_markdown,
             commands::has_api_key,

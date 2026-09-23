@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import AnswerBody from './AnswerBody.svelte';
   import QuestionComposer from './QuestionComposer.svelte';
   import { questionConversations, type AskQuestion } from './questions';
@@ -16,9 +17,18 @@
 
   let conversation = $derived(questionConversations.get(scope));
   let thread = $derived($conversation);
+  let exchangeCount = $derived(thread.exchanges.length);
+  let asking = $derived(thread.asking);
   let composer: QuestionComposer;
+  let history: HTMLDivElement;
   let copyStatus = $state('');
   let copyFailed = $state(false);
+
+  $effect(() => {
+    exchangeCount;
+    asking;
+    void tick().then(() => history?.scrollTo({ top: history.scrollHeight }));
+  });
 
   async function ask() {
     if (!hasApiKey) { onOpenSettings(); return; }
@@ -48,6 +58,8 @@
 </script>
 
 <div class="question-thread">
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex (The scrollable conversation needs keyboard focus for arrow/Page Up navigation.) -->
+  <div class="thread-history" bind:this={history} tabindex="0" role="region" aria-label="Conversation">
   {#if thread.exchanges.length}
     <ol class="exchange-list" aria-label="Questions and answers">
       {#each thread.exchanges as exchange}
@@ -88,13 +100,6 @@
   {#if thread.asking && thread.pendingQuestion}
     <p class="pending-question" dir="auto">{thread.pendingQuestion}</p>
   {/if}
-  <QuestionComposer bind:this={composer} {id} question={thread.question} asking={thread.asking} {hasApiKey}
-    placeholder={thread.exchanges.length ? 'Ask a follow-up…' : 'Ask a question…'}
-    onAsk={ask} onInput={(question) => conversation.edit(question)} />
-  {#if thread.exchanges.length || (thread.pendingQuestion && !thread.asking)}
-    <button class="new-conversation" type="button" disabled={thread.asking}
-      onclick={() => { conversation.clear(); composer.focus(); }}>New conversation</button>
-  {/if}
   {#if thread.error}
     <div class="question-error" role="alert">
       <p>{thread.error}</p>
@@ -109,11 +114,24 @@
     </div>
   {/if}
   {#if copyStatus}<p class="copy-status" class:copy-failed={copyFailed} role="status">{copyStatus}</p>{/if}
+  </div>
+  <div class="thread-composer">
+    <QuestionComposer bind:this={composer} {id} question={thread.question} asking={thread.asking} {hasApiKey}
+      placeholder={thread.exchanges.length ? 'Ask a follow-up…' : 'Ask a question…'}
+      onAsk={ask} onInput={(question) => conversation.edit(question)} />
+    {#if thread.exchanges.length || (thread.pendingQuestion && !thread.asking)}
+      <button class="new-conversation" type="button" disabled={thread.asking}
+        onclick={() => { conversation.clear(); composer.focus(); }}>New conversation</button>
+    {/if}
+  </div>
   <p class="sr-only" role="status">{thread.asking ? 'Reading your notes.' : thread.exchanges.length ? 'Answer ready.' : ''}</p>
 </div>
 
 <style>
-  .question-thread { min-width: 0; }
+  .question-thread { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+  .thread-history { flex: 1; min-height: 0; padding: 2px 4px 16px 2px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+  .thread-history:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .thread-composer { flex: 0 0 auto; padding-top: 12px; border-top: 1px solid var(--line); }
   .pending-question { margin: 0 0 12px; color: var(--ink); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
   .retry-question { color: var(--muted-text); }
   .copy-answer { padding: 4px 0; margin-top: 10px; border: 0; background: transparent; color: var(--muted-text); font-size: 12px; cursor: pointer; }

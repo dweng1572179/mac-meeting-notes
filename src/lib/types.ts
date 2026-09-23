@@ -55,7 +55,7 @@ export type Session = {
 };
 
 export type TranscriptionSettings = { language: string; vocabulary: string; model: 'gpt-4o-mini-transcribe' | 'gpt-4o-transcribe' | 'gpt-4o-transcribe-diarize' };
-export type Bootstrap = { sessions: Session[]; hasApiKey: boolean; settings: TranscriptionSettings };
+export type Bootstrap = { sessions: Session[]; hasApiKey: boolean; settings: TranscriptionSettings; keyAccessError?: string | null; dataDirectory?: string };
 export type CreateSessionInput = Pick<Session, 'title' | 'context' | 'attendees'>;
 export type UpdateSessionInput = Pick<
   Session,

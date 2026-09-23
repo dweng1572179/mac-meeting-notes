@@ -21,6 +21,7 @@
   } = $props();
 
   let visibleSessions = $derived(sessionsForFolder(sessions, folder));
+  let chatExpanded = $state(false);
 
   const meetingTime = (startedAt: string) =>
     new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(
@@ -40,10 +41,9 @@
     <header class="library-header">
       <div class="library-title-copy">
         {#if folder}
-          <span class="folder-mark" aria-hidden="true">↗</span>
+          <span class="folder-mark" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M2.5 5.5h5l2 2h8v8h-15z" /></svg></span>
         {/if}
         <div>
-          <p>{folder ? 'Folder' : 'Local meeting library'}</p>
           <h1 id="library-title">{folder ?? 'All meetings'}</h1>
           <span>{folder ? `Meetings filed under ${folder}` : 'Every conversation, note, and decision in one place.'}</span>
         </div>
@@ -79,15 +79,21 @@
     {/if}
   </div>
 
-  <aside class="ask-panel" aria-labelledby="ask-title">
-    <div>
-      <h2 id="ask-title">Ask {folder ? `about ${folder}` : 'your meetings'}</h2>
-      <span>{folder ? 'From the latest 20 meetings in this folder' : 'From your latest 20 completed meetings'}</span>
+  <aside class="ask-panel question-panel" class:expanded={chatExpanded} aria-label={folder ? `Ask about ${folder}` : 'Ask your meetings'}>
+    <button class="question-panel-toggle" type="button" aria-expanded={chatExpanded} aria-controls="library-question-panel" onclick={() => (chatExpanded = !chatExpanded)}>
+      <span>Ask {folder ? 'this folder' : 'your meetings'}</span>
+      <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 12 5-5 5 5" /></svg>
+    </button>
+    <div class="question-panel-content" id="library-question-panel">
+      <header class="question-panel-heading">
+        <h2>Ask {folder ? `about ${folder}` : 'your meetings'}</h2>
+        <p>{folder ? 'From the latest 20 meetings in this folder' : 'From your latest 20 completed meetings'}</p>
+      </header>
+      {#key folder}
+        <QuestionThread id="meeting-question" scope={folder === null ? 'all' : `folder:${folder}`} sourceIds={visibleSessions.filter((session) => session.status !== 'draft').map((session) => session.id)} {hasApiKey} {onOpenSettings}
+          onAsk={(question, history) => askMeetings(folder, question, history)} onSelectSource={onSelect}
+          starters={['Summarize the main themes.', 'What changed across these meetings?']} />
+      {/key}
     </div>
-    {#key folder}
-      <QuestionThread id="meeting-question" scope={folder === null ? 'all' : `folder:${folder}`} sourceIds={visibleSessions.filter((session) => session.status !== 'draft').map((session) => session.id)} {hasApiKey} {onOpenSettings}
-        onAsk={(question, history) => askMeetings(folder, question, history)} onSelectSource={onSelect}
-        starters={['Summarize the main themes.', 'What changed across these meetings?']} />
-    {/key}
   </aside>
 </section>
