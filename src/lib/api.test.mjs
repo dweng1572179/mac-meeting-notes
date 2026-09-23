@@ -4,6 +4,20 @@ import { readFileSync } from 'node:fs';
 import { mockIPC } from '@tauri-apps/api/mocks';
 import * as api from './api.ts';
 
+test('credential removal and fixed settings destinations use native commands without exposing keys', async () => {
+  globalThis.window = {};
+  const requests = [];
+  mockIPC((command, payload) => { requests.push({ command, payload }); });
+  try {
+    await api.removeApiKey();
+    await api.openSettingsDestination('microphone');
+    assert.deepEqual(requests, [
+      { command: 'remove_api_key', payload: {} },
+      { command: 'open_settings_destination', payload: { destination: 'microphone' } }
+    ]);
+  } finally { delete globalThis.window; }
+});
+
 test('disposes a listener that registers after its owner is disposed', async () => {
   let finishRegistration;
   const registration = new Promise((resolve) => (finishRegistration = resolve));

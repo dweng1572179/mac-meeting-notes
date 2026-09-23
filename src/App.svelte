@@ -13,6 +13,8 @@
   import LibraryView from './lib/LibraryView.svelte';
   import MeetingEditor from './lib/MeetingEditor.svelte';
   import SettingsDialog from './lib/SettingsDialog.svelte';
+  import Onboarding from './lib/Onboarding.svelte';
+  import { completeSetup, shouldOfferSetup } from './lib/onboarding';
   import Sidebar from './lib/Sidebar.svelte';
   import { errorMessage } from './lib/recovery';
   import { questionConversations } from './lib/questions';
@@ -23,6 +25,10 @@
   let selectedId = $state<string | null>(null);
   let selectedFolder = $state<string | null>(null);
   let hasApiKey = $state(false);
+  let keyAccessError = $state<string | null>(null);
+  let dataDirectory = $state('');
+  let onboardingOpen = $state(false);
+  let settingsSection = $state<'ai' | 'recording'>('recording');
   let settings = $state<TranscriptionSettings>({ ...defaultTranscriptionSettings });
   let loadFailed = $state(false);
   let settingsOpen = $state(false);
@@ -66,7 +72,10 @@
       const data = await bootstrap();
       sessions = data.sessions;
       hasApiKey = data.hasApiKey;
+      keyAccessError = data.keyAccessError ?? null;
+      dataDirectory = data.dataDirectory ?? '';
       settings = data.settings ?? { ...defaultTranscriptionSettings };
+      onboardingOpen = shouldOfferSetup(data.sessions.length, data.hasApiKey);
       loadFailed = false;
     } catch (cause) {
       loadFailed = true;
@@ -89,6 +98,7 @@
       if (selectedFolder) session = await saveSession({ id: session.id, title: session.title, context: '', attendees: [], folder: selectedFolder, originalNotes: '' });
       sessions = [session, ...sessions];
       selectedId = session.id;
+      dismissSetup();
     } catch (cause) {
       error = errorMessage(cause, 'A new note could not be created. Your current note is still open.');
     } finally {
@@ -114,11 +124,12 @@
   }
 
   async function selectSession(id: string | null) {
-    if (id === selectedId) return;
+    if (id === selectedId && !onboardingOpen) return;
     error = '';
     try {
       await editor?.flush();
       selectedId = id;
+      if (onboardingOpen) dismissSetup();
     } catch (cause) {
       error = errorMessage(cause, 'Save this note before switching meetings.');
     }
@@ -130,6 +141,7 @@
       await editor?.flush();
       selectedId = null;
       selectedFolder = folder;
+      if (onboardingOpen) dismissSetup();
     } catch (cause) {
       error = errorMessage(cause, 'Save this note before switching views.');
     }
@@ -154,6 +166,23 @@
     recordingBaselines = active;
   }
 
+  function dismissSetup() {
+    onboardingOpen = false;
+    if (!completeSetup()) error = 'Your setup preference could not be saved. You can keep using local notes; this guide may appear again next time.';
+  }
+
+  function openSettings(section: 'ai' | 'recording' = hasApiKey ? 'recording' : 'ai') {
+    settingsSection = section;
+    settingsOpen = true;
+  }
+
+  async function showSetup() {
+    try {
+      await editor?.flush();
+      onboardingOpen = true;
+    } catch (cause) { error = errorMessage(cause, 'Save your note before opening the setup guide.'); }
+  }
+
 </script>
 
 <div class="app-shell">
@@ -166,7 +195,7 @@
     onNewNote={newNote}
     onSelect={selectSession}
     onFolder={(folder) => selectLibrary(folder)}
-    onSettings={() => (settingsOpen = true)}
+    onSettings={() => openSettings()}
   />
 
   <main>
@@ -180,7 +209,7 @@
             <p>A quiet source may produce no frames. If speech is expected, check your selected microphone and system audio permissions. Stop recording before updating the app.</p>
           </div>
         {/if}
-        {#if selectedId !== recordingId}
+        {#if selectedId !== recordingId || onboardingOpen}
           <button type="button" onclick={() => selectSession(recordingId)}>Return to recording</button>
         {/if}
       </aside>
@@ -188,9 +217,14 @@
     {#if error}
       <div class="app-error" role="alert">{error}{#if loadFailed}<button type="button" disabled={loading} onclick={loadLibrary}>Reload library</button>{/if}</div>
     {/if}
+    {#if keyAccessError && !onboardingOpen}
+      <div class="app-error" role="alert">AI credentials are unavailable. Local notes are still available. <button type="button" onclick={() => openSettings('ai')}>Review AI settings</button></div>
+    {/if}
 
     {#if loading}
       <p class="loading-copy">Opening your meeting library…</p>
+    {:else if onboardingOpen}
+      <Onboarding {hasApiKey} {keyAccessError} onSetupAI={() => openSettings('ai')} onStart={newNote} onDismiss={dismissSetup} />
     {:else if selected}
       {#key selected.id}
         <MeetingEditor
@@ -202,7 +236,7 @@
           recordingStartedAt={recordingBaselines[selected.id] ?? null}
           onRecordingStarted={rememberRecordingStart}
           onSessionChange={updateSession}
-          onOpenSettings={() => (settingsOpen = true)}
+          onOpenSettings={() => openSettings('ai')}
           onDeleteTranscript={removeTranscript}
           onDeleteMeeting={removeMeeting}
           onNewNote={newNote}
@@ -216,7 +250,7 @@
           folder={selectedFolder}
           onSelect={selectSession}
           onNewNote={newNote}
-          onOpenSettings={() => (settingsOpen = true)}
+          onOpenSettings={() => openSettings('ai')}
         />
       {/key}
     {/if}
@@ -226,9 +260,14 @@
 {#if settingsOpen}
   <SettingsDialog
     {hasApiKey}
+    {keyAccessError}
+    {dataDirectory}
+    busy={sessions.some((session) => session.status === 'recording' || session.status === 'processing')}
     {settings}
+    initialSection={settingsSection}
     onSettingsSaved={(saved) => (settings = saved)}
-    onSaved={() => (hasApiKey = true)}
+    onKeyChanged={(saved) => { hasApiKey = saved; keyAccessError = null; }}
+    onShowSetup={showSetup}
     onClose={() => (settingsOpen = false)}
   />
 {/if}

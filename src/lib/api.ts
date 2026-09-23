@@ -66,6 +66,7 @@ let previewSessions: Map<string, Session> | undefined;
 const failedPreviewQuestions = new Set<string>();
 export const defaultTranscriptionSettings: TranscriptionSettings = { language: '', vocabulary: '', model: 'gpt-4o-transcribe-diarize' };
 let previewSettings = { ...defaultTranscriptionSettings };
+let previewHasApiKey: boolean | undefined;
 
 function previewState(): Session {
   const failure = new URLSearchParams(window.location.search).get('failure');
@@ -156,8 +157,10 @@ export async function bootstrap(): Promise<Bootstrap> {
   if (!isNative()) {
     return {
       sessions: structuredClone([...previewLibrary().values()]),
-      hasApiKey: new URLSearchParams(window.location.search).has('key'),
-      settings: previewSettings
+      hasApiKey: previewHasApiKey ?? new URLSearchParams(window.location.search).has('key'),
+      settings: previewSettings,
+      keyAccessError: new URLSearchParams(window.location.search).has('keyError') ? '[SIMULATION] Your system credential store could not be opened. Local notes are still available.' : null,
+      dataDirectory: '[SIMULATION] Local application data folder'
     };
   }
   return invoke<Bootstrap>('bootstrap');
@@ -310,12 +313,23 @@ export async function deleteTranscript(id: string): Promise<Session> {
 }
 
 export async function saveApiKey(key: string): Promise<void> {
-  if (!isNative()) return;
+  if (!isNative()) { previewHasApiKey = true; return; }
   return invoke<void>('save_api_key', { key });
 }
 
+export async function removeApiKey(): Promise<void> {
+  if (!isNative()) { previewHasApiKey = false; return; }
+  return invoke<void>('remove_api_key');
+}
+
+export type SettingsDestination = 'api-keys' | 'billing' | 'microphone' | 'system-audio' | 'data-folder';
+export async function openSettingsDestination(destination: SettingsDestination): Promise<void> {
+  if (!isNative()) throw new Error('[SIMULATION] This action is available in the installed desktop app.');
+  return invoke<void>('open_settings_destination', { destination });
+}
+
 export async function hasApiKey(): Promise<boolean> {
-  if (!isNative()) return false;
+  if (!isNative()) return previewHasApiKey ?? new URLSearchParams(window.location.search).has('key');
   return invoke<boolean>('has_api_key');
 }
 

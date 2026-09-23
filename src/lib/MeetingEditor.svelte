@@ -85,6 +85,7 @@
   let savedNotesRevision = $state(0);
   let notesDirty = $derived(notesRevision > savedNotesRevision);
   let view = $state<'notes' | 'transcript'>('notes');
+  let detailsOpen = $state(initial(() => session.status === 'draft'));
   let editingNotes = $state(initial(() => session.status !== 'complete'));
   let lastStatus = initial(() => session.status);
   let saveStatus = $state('');
@@ -305,6 +306,7 @@
     );
 </script>
 
+<div class="meeting-workspace" class:with-chat={session.status === 'complete' && session.transcript !== null}>
 <article class="meeting-document" aria-labelledby="meeting-heading">
   <header class="document-header">
     <h1 class="sr-only" id="meeting-heading">{title || 'Untitled meeting'}</h1>
@@ -360,7 +362,12 @@
       </div>
     {/if}
 
-    <div class="document-fields">
+    <details class="meeting-metadata" bind:open={detailsOpen}>
+      <summary>
+        <span>Meeting details</span>
+        <span class="metadata-preview">{[folder.trim(), attendees.trim()].filter(Boolean).join(' · ') || 'Participants, context, category'}</span>
+      </summary>
+      <div class="document-fields">
       <label>
         <span>Participants</span>
         <span class="field-control"><input value={attendees} oninput={updateAttendees} placeholder="Add names, separated by commas" disabled={Boolean(suggestionPending)} />
@@ -386,7 +393,8 @@
           {/if}
         </span>
       </label>
-    </div>
+      </div>
+    </details>
     {#if suggestionError}<p class="suggestion-error" role="alert">{suggestionError}</p>{/if}
   </header>
 
@@ -467,12 +475,11 @@
     </div>
   </section>
 
+</article>
   {#if session.status === 'complete' && session.transcript !== null}
     <MeetingQuestion sessionId={session.id} {hasApiKey} onAsk={askCurrentMeeting} {onOpenSettings} topic={session.aiSuggestions?.topics.find((topic) => topic.evidence.length)?.title} />
   {/if}
-
-
-</article>
+</div>
 
 <dialog
   bind:this={confirmationDialog}

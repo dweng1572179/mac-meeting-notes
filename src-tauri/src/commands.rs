@@ -2,7 +2,10 @@ use std::{
     collections::HashSet,
     fs,
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
     time::Duration,
 };
 
@@ -36,6 +39,8 @@ mod live;
 pub struct Bootstrap {
     pub sessions: Vec<Session>,
     pub has_api_key: bool,
+    pub key_access_error: Option<String>,
+    pub data_directory: String,
     pub settings: TranscriptionSettings,
 }
 
@@ -47,6 +52,15 @@ pub struct AppState {
     // ponytail: one global transaction lock fits the single-user v1; use per-session locks only if contention becomes measurable.
     transactions: Mutex<()>,
     processing_jobs: Arc<Mutex<HashSet<String>>>,
+    key_change_pending: AtomicBool,
+}
+
+struct KeyChange<'a>(&'a AtomicBool);
+
+impl Drop for KeyChange<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl AppState {
@@ -58,15 +72,42 @@ impl AppState {
             openai: OpenAiClient::new(),
             transactions: Mutex::new(()),
             processing_jobs: Arc::new(Mutex::new(HashSet::new())),
+            key_change_pending: AtomicBool::new(false),
         }
+    }
+
+    fn begin_key_change(&self) -> AppResult<KeyChange<'_>> {
+        self.key_change_pending.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| AppError::new("key_change_pending", "An API key change is still in progress. Wait for it to finish, then try again."))?;
+        Ok(KeyChange(&self.key_change_pending))
     }
 }
 
 #[tauri::command]
-pub fn bootstrap(state: State<'_, AppState>) -> AppResult<Bootstrap> {
+pub fn bootstrap(app: AppHandle, state: State<'_, AppState>) -> AppResult<Bootstrap> {
+    bootstrap_state(
+        &state,
+        app.path()
+            .app_data_dir()
+            .map_err(|error| AppError::new("storage_error", error.to_string()))?,
+        ApiKeyStore::exists(),
+    )
+}
+
+fn bootstrap_state(
+    state: &AppState,
+    data_directory: PathBuf,
+    key_access: AppResult<bool>,
+) -> AppResult<Bootstrap> {
+    let (has_api_key, key_access_error) = match key_access {
+        Ok(exists) => (exists, None),
+        Err(_) => (false, Some("Your saved API key could not be accessed. Local notes are available. Open Settings to retry or replace the key.".into())),
+    };
     Ok(Bootstrap {
         sessions: state.store.list()?,
-        has_api_key: ApiKeyStore::exists()?,
+        has_api_key,
+        key_access_error,
+        data_directory: data_directory.to_string_lossy().into_owned(),
         settings: state.store.settings()?,
     })
 }
@@ -334,12 +375,137 @@ pub fn delete_transcript(state: State<'_, AppState>, id: String) -> AppResult<Se
 
 #[tauri::command]
 pub async fn save_api_key(state: State<'_, AppState>, key: String) -> AppResult<()> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err(AppError::new("invalid_api_key", "API key is required"));
-    }
+    let key = crate::secrets::validate_key_input(&key)?;
+    let _key_change = state.begin_key_change()?;
     state.openai.validate_key(key).await?;
     ApiKeyStore::save(key)
+}
+
+#[tauri::command]
+pub fn remove_api_key(state: State<'_, AppState>) -> AppResult<()> {
+    remove_api_key_state(&state, ApiKeyStore::remove)
+}
+
+fn remove_api_key_state(state: &AppState, remove: impl FnOnce() -> AppResult<()>) -> AppResult<()> {
+    let _key_change = state.begin_key_change()?;
+    let _guard = lock_sessions(state)?;
+    let jobs = state.processing_jobs.lock().map_err(|_| {
+        AppError::new(
+            "processing_unavailable",
+            "Processing status is unavailable. Try again before removing the key.",
+        )
+    })?;
+    if state.recorder.is_recording()
+        || !jobs.is_empty()
+        || state.store.list()?.iter().any(|session| {
+            matches!(
+                session.status,
+                SessionStatus::Recording | SessionStatus::Processing
+            )
+        })
+    {
+        return Err(invalid_status("Stop recording and wait for processing to finish before removing the key. Requests already sent may finish."));
+    }
+    remove()
+}
+
+#[tauri::command]
+pub fn open_settings_destination(app: AppHandle, destination: String) -> AppResult<()> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::new("storage_error", error.to_string()))?;
+    let target = settings_destination(&destination, &directory)?;
+    open_settings_target(&target)
+}
+
+fn settings_destination(
+    destination: &str,
+    data_directory: &std::path::Path,
+) -> AppResult<std::ffi::OsString> {
+    let target = match destination {
+        "api-keys" => "https://platform.openai.com/api-keys",
+        "billing" => "https://platform.openai.com/settings/organization/billing/overview",
+        "data-folder" => return Ok(data_directory.as_os_str().to_owned()),
+        #[cfg(target_os = "macos")]
+        "microphone" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        }
+        #[cfg(target_os = "macos")]
+        "system-audio" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        }
+        #[cfg(target_os = "windows")]
+        "microphone" => "ms-settings:privacy-microphone",
+        #[cfg(target_os = "windows")]
+        "system-audio" => "ms-settings:sound",
+        _ => {
+            return Err(AppError::new(
+                "invalid_settings_destination",
+                "Choose an available Settings destination.",
+            ))
+        }
+    };
+    Ok(target.into())
+}
+
+#[cfg(target_os = "macos")]
+fn open_settings_target(target: &std::ffi::OsStr) -> AppResult<()> {
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg("--")
+        .arg(target)
+        .status()
+        .map_err(|_| {
+            AppError::new(
+                "settings_open",
+                "Could not open the requested settings. Try opening them manually.",
+            )
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "settings_open",
+            "Could not open the requested settings. Try opening them manually.",
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_settings_target(target: &std::ffi::OsStr) -> AppResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::{w, PCWSTR},
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    };
+    let target: Vec<u16> = target.encode_wide().chain(Some(0)).collect();
+    // SAFETY: the allowlisted target is a live, NUL-terminated string. No command arguments or working directory are supplied.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize > 32 {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "settings_open",
+            "Could not open the requested settings. Try opening them manually.",
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn open_settings_target(_target: &std::ffi::OsStr) -> AppResult<()> {
+    Err(AppError::new(
+        "settings_open",
+        "Open these settings manually on this platform.",
+    ))
 }
 
 #[tauri::command]
@@ -1410,6 +1576,127 @@ mod tests {
         domain::{AppError, CreateSessionInput, Session, SessionStatus, UpdateSessionInput},
         store::SessionStore,
     };
+
+    #[test]
+    fn settings_bootstrap_keeps_local_library_when_keychain_is_unavailable() {
+        let (state, root, id) = state(SessionStatus::Draft);
+        let data = super::bootstrap_state(
+            &state,
+            root.clone(),
+            Err(AppError::new("keychain", "locked")),
+        )
+        .unwrap();
+        assert_eq!(data.sessions[0].id, id);
+        assert!(!data.has_api_key);
+        assert!(data.key_access_error.is_some());
+        assert_eq!(data.data_directory, root.to_string_lossy());
+        let data = super::bootstrap_state(&state, root.clone(), Ok(false)).unwrap();
+        assert!(data.key_access_error.is_none());
+        let data = super::bootstrap_state(&state, root.clone(), Ok(true)).unwrap();
+        assert!(data.has_api_key);
+        assert!(data.key_access_error.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_key_removal_refuses_capture_and_processing_before_touching_credentials() {
+        for status in [SessionStatus::Recording, SessionStatus::Processing] {
+            let (state, root, _) = state(status);
+            let error = super::remove_api_key_state(&state, || {
+                panic!("must not touch credentials while busy")
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_session_status");
+            fs::remove_dir_all(root).unwrap();
+        }
+        let (state, root, id) = state(SessionStatus::Draft);
+        state.processing_jobs.lock().unwrap().insert(id.clone());
+        assert!(super::remove_api_key_state(&state, || panic!(
+            "must not touch credentials with a lease"
+        ))
+        .is_err());
+        state.processing_jobs.lock().unwrap().clear();
+        let error =
+            super::remove_api_key_state(&state, || Err(AppError::new("keychain", "unavailable")))
+                .unwrap_err();
+        assert_eq!(error.code, "keychain");
+        super::remove_api_key_state(&state, || Ok(())).unwrap();
+        assert_eq!(state.store.get(&id).unwrap().status, SessionStatus::Draft);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_credential_changes_reject_overlap_and_release_after_failure() {
+        let (state, root, _) = state(SessionStatus::Draft);
+        let validation_in_progress = state.begin_key_change().unwrap();
+        let error = super::remove_api_key_state(&state, || panic!("validation must finish first"))
+            .unwrap_err();
+        assert_eq!(error.code, "key_change_pending");
+        assert!(state.begin_key_change().is_err());
+        drop(validation_in_progress);
+        assert!(super::remove_api_key_state(&state, || Err(AppError::new(
+            "keychain",
+            "unavailable"
+        )))
+        .is_err());
+        super::remove_api_key_state(&state, || Ok(())).unwrap();
+        assert!(state.begin_key_change().is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_destinations_do_not_accept_frontend_urls_paths_or_shell_arguments() {
+        let root = PathBuf::from("/synthetic/app data");
+        for invalid in [
+            "https://evil.example",
+            "file:///private",
+            "/tmp/data",
+            "--args",
+            "api-keys; open /tmp",
+            "",
+        ] {
+            assert_eq!(
+                super::settings_destination(invalid, &root)
+                    .unwrap_err()
+                    .code,
+                "invalid_settings_destination"
+            );
+        }
+        assert_eq!(
+            super::settings_destination("api-keys", &root).unwrap(),
+            "https://platform.openai.com/api-keys"
+        );
+        assert_eq!(
+            super::settings_destination("billing", &root).unwrap(),
+            "https://platform.openai.com/settings/organization/billing/overview"
+        );
+        assert_eq!(
+            super::settings_destination("data-folder", &root).unwrap(),
+            root.as_os_str()
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                super::settings_destination("microphone", &root).unwrap(),
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            );
+            assert_eq!(
+                super::settings_destination("system-audio", &root).unwrap(),
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            );
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(
+                super::settings_destination("microphone", &root).unwrap(),
+                "ms-settings:privacy-microphone"
+            );
+            assert_eq!(
+                super::settings_destination("system-audio", &root).unwrap(),
+                "ms-settings:sound"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
