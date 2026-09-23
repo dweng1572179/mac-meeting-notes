@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
   import AnswerBody from './AnswerBody.svelte';
   import QuestionComposer from './QuestionComposer.svelte';
-  import { createQuestionConversation, type AskQuestion } from './questions';
+  import { questionConversations, type AskQuestion } from './questions';
 
-  let { id, hasApiKey, onAsk, onOpenSettings, onSelectSource, starters = [] }: {
+  let { id, scope, sourceIds, hasApiKey, onAsk, onOpenSettings, onSelectSource, starters = [] }: {
     id: string;
+    scope: string;
+    sourceIds: string[];
     hasApiKey: boolean;
     onAsk: AskQuestion;
     onOpenSettings: () => void;
@@ -13,14 +14,31 @@
     starters?: string[];
   } = $props();
 
-  const conversation = createQuestionConversation((next) => { state = next; });
-  let state = $state(conversation.state);
+  let conversation = $derived(questionConversations.get(scope));
+  let thread = $derived($conversation);
   let composer: QuestionComposer;
-  onDestroy(() => conversation.dispose());
+  let copyStatus = $state('');
+  let copyFailed = $state(false);
 
   async function ask() {
     if (!hasApiKey) { onOpenSettings(); return; }
-    await conversation.ask(onAsk);
+    await conversation.ask(onAsk, sourceIds);
+  }
+
+  async function retry() {
+    if (!hasApiKey) { onOpenSettings(); return; }
+    await conversation.retry(onAsk, sourceIds);
+  }
+
+  async function copyAnswer(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copyStatus = 'Answer copied.';
+      copyFailed = false;
+    } catch {
+      copyStatus = 'The answer could not be copied. Select its text and copy it manually.';
+      copyFailed = true;
+    }
   }
 
   function chooseStarter(question: string) {
@@ -30,12 +48,14 @@
 </script>
 
 <div class="question-thread">
-  {#if state.exchanges.length}
+  {#if thread.exchanges.length}
     <ol class="exchange-list" aria-label="Questions and answers">
-      {#each state.exchanges as exchange}
+      {#each thread.exchanges as exchange}
         <li class="exchange">
           <p class="asked" dir="auto">{exchange.question}</p>
           <AnswerBody text={exchange.answer.answer} />
+          <button class="copy-answer" type="button" onclick={() => copyAnswer(exchange.answer.answer)}
+            aria-label={`Copy answer to: ${exchange.question}`}>Copy answer</button>
           {#if exchange.answer.citations.length}
             <details class="answer-sources">
               <summary>{exchange.answer.citations.length} {exchange.answer.citations.length === 1 ? 'source' : 'sources'}</summary>
@@ -60,29 +80,46 @@
   {:else if starters.length}
     <ul class="question-starters" aria-label="Suggested questions">
       {#each starters as starter}
-        <li><button type="button" disabled={state.asking} onclick={() => chooseStarter(starter)}>{starter}</button></li>
+        <li><button type="button" disabled={thread.asking} onclick={() => chooseStarter(starter)}>{starter}</button></li>
       {/each}
     </ul>
   {/if}
 
-  <QuestionComposer bind:this={composer} {id} question={state.question} asking={state.asking} {hasApiKey}
-    placeholder={state.exchanges.length ? 'Ask a follow-up…' : 'Ask a question…'}
+  {#if thread.asking && thread.pendingQuestion}
+    <p class="pending-question" dir="auto">{thread.pendingQuestion}</p>
+  {/if}
+  <QuestionComposer bind:this={composer} {id} question={thread.question} asking={thread.asking} {hasApiKey}
+    placeholder={thread.exchanges.length ? 'Ask a follow-up…' : 'Ask a question…'}
     onAsk={ask} onInput={(question) => conversation.edit(question)} />
-  {#if state.exchanges.length}
-    <button class="new-conversation" type="button" disabled={state.asking}
+  {#if thread.exchanges.length || (thread.pendingQuestion && !thread.asking)}
+    <button class="new-conversation" type="button" disabled={thread.asking}
       onclick={() => { conversation.clear(); composer.focus(); }}>New conversation</button>
   {/if}
-  {#if state.error}
+  {#if thread.error}
     <div class="question-error" role="alert">
-      <p>{state.error}</p>
-      <button type="button" onclick={ask} disabled={state.asking || !state.question.trim()}>Try again</button>
+      <p>{thread.error}</p>
+      {#if thread.pendingQuestion}<p class="retry-question" dir="auto">{thread.pendingQuestion}</p>{/if}
+      <button type="button" onclick={retry} disabled={thread.asking || !(thread.pendingQuestion || thread.question.trim())}>Try again</button>
     </div>
   {/if}
-  <p class="sr-only" role="status">{state.asking ? 'Reading your notes.' : state.exchanges.length ? 'Answer ready.' : ''}</p>
+  {#if thread.persistenceError}
+    <div class="question-error" role="alert">
+      <p>{thread.persistenceError}</p>
+      <button type="button" onclick={() => conversation.retrySave()}>Retry saving</button>
+    </div>
+  {/if}
+  {#if copyStatus}<p class="copy-status" class:copy-failed={copyFailed} role="status">{copyStatus}</p>{/if}
+  <p class="sr-only" role="status">{thread.asking ? 'Reading your notes.' : thread.exchanges.length ? 'Answer ready.' : ''}</p>
 </div>
 
 <style>
   .question-thread { min-width: 0; }
+  .pending-question { margin: 0 0 12px; color: var(--ink); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+  .retry-question { color: var(--muted-text); }
+  .copy-answer { padding: 4px 0; margin-top: 10px; border: 0; background: transparent; color: var(--muted-text); font-size: 12px; cursor: pointer; }
+  .copy-answer:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+  .copy-status { color: var(--muted-text); font-size: 12px; line-height: 1.6; }
+  .copy-failed { color: var(--danger); }
   .exchange-list { display: grid; gap: 28px; padding: 0; margin: 0 0 24px; list-style: none; }
   .exchange + .exchange { padding-top: 24px; border-top: 1px solid var(--line); }
   .asked { margin: 0 0 11px; color: var(--ink); font-size: 14px; font-weight: 650; line-height: 1.55; overflow-wrap: anywhere; }

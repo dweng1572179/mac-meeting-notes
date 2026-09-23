@@ -2,7 +2,8 @@
   import QuestionThread from './QuestionThread.svelte';
   import type { AskQuestion } from './questions';
 
-  let { hasApiKey, onAsk, onOpenSettings, topic }: {
+  let { sessionId, hasApiKey, onAsk, onOpenSettings, topic }: {
+    sessionId: string;
     hasApiKey: boolean;
     onAsk: AskQuestion;
     onOpenSettings: () => void;
@@ -19,7 +20,7 @@
     <h2 id="meeting-question-title">Ask this meeting</h2>
     <p>From your notes and transcript</p>
   </header>
-  <QuestionThread id="single-meeting-question" {hasApiKey} {onAsk} {onOpenSettings} {starters} />
+  <QuestionThread id="single-meeting-question" scope={`meeting:${sessionId}`} sourceIds={[sessionId]} {hasApiKey} {onAsk} {onOpenSettings} {starters} />
 </section>
 
 <style>

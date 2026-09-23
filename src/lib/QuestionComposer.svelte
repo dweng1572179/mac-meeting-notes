@@ -50,7 +50,7 @@
   <label class="sr-only" for={id}>Question</label>
   <textarea bind:this={textarea} {id} value={question} use:autosize={question} oninput={(event) => onInput(event.currentTarget.value)}
     onkeydown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) submit(event); }}
-    rows="1" maxlength="2000" dir="auto" readonly={asking} {placeholder}
+    rows="1" maxlength="2000" dir="auto" {placeholder}
     aria-describedby={`${id}-hint`}></textarea>
   <button type="submit" disabled={asking || !question.trim()} aria-label={asking ? 'Reading meeting notes' : hasApiKey ? 'Ask question' : 'Add API key'} title={hasApiKey ? `Ask question (${questionShortcut()})` : 'Add API key'}>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>

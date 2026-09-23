@@ -85,7 +85,7 @@
       <span>{folder ? 'From the latest 20 meetings in this folder' : 'From your latest 20 completed meetings'}</span>
     </div>
     {#key folder}
-      <QuestionThread id="meeting-question" {hasApiKey} {onOpenSettings}
+      <QuestionThread id="meeting-question" scope={folder === null ? 'all' : `folder:${folder}`} sourceIds={visibleSessions.filter((session) => session.status !== 'draft').map((session) => session.id)} {hasApiKey} {onOpenSettings}
         onAsk={(question, history) => askMeetings(folder, question, history)} onSelectSource={onSelect}
         starters={['Summarize the main themes.', 'What changed across these meetings?']} />
     {/key}

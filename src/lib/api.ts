@@ -1,3 +1,4 @@
+import { meetingNotes } from './meeting-workspace.ts';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -61,7 +62,8 @@ const basePreviewSession: Session = {
 };
 
 const isNative = () => '__TAURI_INTERNALS__' in window;
-let previewSession: Session | undefined;
+let previewSessions: Map<string, Session> | undefined;
+const failedPreviewQuestions = new Set<string>();
 export const defaultTranscriptionSettings: TranscriptionSettings = { language: '', vocabulary: '', model: 'gpt-4o-transcribe-diarize' };
 let previewSettings = { ...defaultTranscriptionSettings };
 
@@ -103,13 +105,57 @@ function previewState(): Session {
   };
 }
 
-const previewDelay = () => new Promise((resolve) => setTimeout(resolve, 350));
+const previewDelay = (ms = 350) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function previewLibrary() {
+  if (!previewSessions) {
+    const query = new URLSearchParams(window.location.search);
+    const initial = previewState();
+    previewSessions = new Map(query.has('empty') ? [] : [[initial.id, initial]]);
+    if (!query.has('empty') && query.get('meetings') === '2') {
+      const other: Session = { ...previewState(), id: 'simulation-harbor-planning', title: '[SIMULATION] Harbor planning', folder: 'Planning', context: '', attendees: [], status: 'complete', notes: '[SIMULATION] Maya will prepare the launch checklist by Tuesday.', transcript: null, enrichedNotes: null, transcription: [], aiSuggestions: null };
+      previewSessions.set(other.id, other);
+    }
+  }
+  return previewSessions;
+}
+
+function previewSession(id: string): Session {
+  const session = previewLibrary().get(id);
+  if (!session) throw new Error('[SIMULATION] This meeting no longer exists.');
+  return session;
+}
+
+function updatePreviewSession(session: Session): Session {
+  previewLibrary().set(session.id, session);
+  return session;
+}
+
+async function previewAnswer(scope: string, sources: Session[], question: string, history: MeetingQuestionTurn[] = []): Promise<MeetingAnswer> {
+  const query = new URLSearchParams(window.location.search);
+  const requestedDelay = Number(query.get('askDelay') ?? 350);
+  await previewDelay(Number.isFinite(requestedDelay) ? Math.max(0, Math.min(requestedDelay, 60_000)) : 350);
+  const requestKey = JSON.stringify([scope, question]);
+  if (query.get('askError') === 'always' || (query.get('askError') === 'once' && !failedPreviewQuestions.has(requestKey))) {
+    failedPreviewQuestions.add(requestKey);
+    throw new Error('[SIMULATION] Connection interrupted. Your question is ready to retry.');
+  }
+  const available = sources.filter((source) => previewLibrary().has(source.id) && source.status === 'complete' && (meetingNotes(source).trim() || source.transcript?.trim() || source.context.trim()));
+  if (!available.length) throw new Error('[SIMULATION] No completed meetings with source material are available here yet.');
+  const source = available[0];
+  const evidence = meetingNotes(source).trim() || source.transcript?.trim() || source.context.trim();
+  const excerpt = evidence.split(/\n\s*\n/u).find((paragraph) => !paragraph.startsWith('#')) ?? evidence;
+  const response = `[SIMULATION] ${history.length ? 'For this follow-up, the saved evidence still says:' : 'The saved meeting says:'}\n\n${excerpt}\n\nThis preview uses synthetic local content and does not contact OpenAI.`;
+  return {
+    answer: query.get('answer') === 'long' ? Array.from({ length: 40 }, (_, i) => `## Detail ${i + 1}\n\n${response}`).join('\n\n') : response,
+    citations: [{ sessionId: source.id, title: source.title, excerpt }]
+  };
+}
 
 export async function bootstrap(): Promise<Bootstrap> {
   if (!isNative()) {
-    previewSession = previewState();
     return {
-      sessions: new URLSearchParams(window.location.search).has('empty') ? [] : [previewSession],
+      sessions: structuredClone([...previewLibrary().values()]),
       hasApiKey: new URLSearchParams(window.location.search).has('key'),
       settings: previewSettings
     };
@@ -119,17 +165,18 @@ export async function bootstrap(): Promise<Bootstrap> {
 
 export async function createSession(input: CreateSessionInput): Promise<Session> {
   if (!isNative()) {
-    previewSession = {
-      ...(previewSession ?? previewState()),
-      id: 'simulation-new-note',
+    return updatePreviewSession({
+      ...previewState(),
+      id: `simulation-${crypto.randomUUID()}`,
       title: input.title || 'Untitled meeting',
-      startedAt: '2026-09-13T16:00:00.000Z',
+      startedAt: new Date().toISOString(),
       endedAt: null,
       context: input.context,
       attendees: input.attendees,
       folder: '',
       originalNotes: '',
       notes: null,
+      previousNotes: null,
       enrichedNotes: null,
       transcript: null,
       audioPath: null,
@@ -145,8 +192,7 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
       liveTranscriptionError: null,
       captureHealth: null,
       status: 'draft'
-    };
-    return previewSession;
+    });
   }
   return invoke<Session>('create_session', { input });
 }
@@ -154,16 +200,14 @@ export async function createSession(input: CreateSessionInput): Promise<Session>
 export async function saveSession(input: UpdateSessionInput): Promise<Session> {
   if (!isNative()) {
     const { notes, ...metadata } = input;
-    previewSession = { ...(previewSession ?? previewState()), ...metadata };
-    if (notes !== undefined) previewSession.notes = notes;
-    return previewSession;
+    return updatePreviewSession({ ...previewSession(input.id), ...metadata, ...(notes !== undefined ? { notes } : {}) });
   }
   return invoke<Session>('save_session', { input });
 }
 
 export async function applySuggestion(id: string, key: string, action: 'apply' | 'dismiss'): Promise<Session> {
   if (!isNative()) {
-    const source = previewSession ?? previewState();
+    const source = previewSession(id);
     const next = { ...source, id, dismissedSuggestions: [...new Set([...(source.dismissedSuggestions ?? []), key])] };
     if (action === 'apply' && source.aiSuggestions) {
       const suggestions = source.aiSuggestions;
@@ -172,8 +216,7 @@ export async function applySuggestion(id: string, key: string, action: 'apply' |
       if (key === 'category' && suggestions.category) next.folder = suggestions.category.value;
       if (key === 'participants') next.attendees = [...new Set([...source.attendees, ...suggestions.participants.map(({ name }) => name)])];
     }
-    previewSession = next;
-    return next;
+    return updatePreviewSession(next);
   }
   return invoke<Session>('apply_suggestion', { id, key, action });
 }
@@ -181,10 +224,22 @@ export async function applySuggestion(id: string, key: string, action: 'apply' |
 export async function refreshInsights(id: string): Promise<Session> {
   if (!isNative()) {
     await previewDelay();
-    previewSession = { ...(previewSession ?? previewState()), id, status: 'complete', error: null };
-    return previewSession;
+    const source = previewSession(id);
+    if (!source.transcript || source.status !== 'complete') throw new Error('[SIMULATION] This meeting is not ready to update notes.');
+    return updatePreviewSession({ ...source, notes: `[SIMULATION] Updated from the saved transcript.\n\n${source.transcript}`, previousNotes: meetingNotes(source) });
   }
   return invoke<Session>('refresh_insights', { id });
+}
+
+export async function restoreNotes(id: string, expectedNotes: string): Promise<Session> {
+  if (!isNative()) {
+    const source = previewSession(id);
+    if (source.status === 'recording' || source.status === 'processing' || source.previousNotes == null || meetingNotes(source) !== expectedNotes) {
+      throw new Error('[SIMULATION] The previous version cannot be restored while notes have changed or processing is active.');
+    }
+    return updatePreviewSession({ ...source, notes: source.previousNotes, previousNotes: meetingNotes(source) });
+  }
+  return invoke<Session>('restore_notes', { id, expectedNotes });
 }
 
 export async function startRecording(id: string): Promise<RecordingInfo> {
@@ -196,7 +251,7 @@ export async function startRecording(id: string): Promise<RecordingInfo> {
         message: '[SIMULATION] System audio capture was denied with OSStatus -66748.'
       };
     }
-    previewSession = { ...(previewSession ?? previewState()), id, status: 'recording', error: null };
+    updatePreviewSession({ ...previewSession(id), status: 'recording', error: null });
     return { sessionId: id, startedAt: new Date().toISOString() };
   }
   return invoke<RecordingInfo>('start_recording', { id });
@@ -205,14 +260,12 @@ export async function startRecording(id: string): Promise<RecordingInfo> {
 export async function stopRecording(id: string): Promise<Session> {
   if (!isNative()) {
     await previewDelay();
-    previewSession = {
-      ...(previewSession ?? previewState()),
-      id,
+    return updatePreviewSession({
+      ...previewSession(id),
       endedAt: new Date().toISOString(),
       status: 'processing',
       error: null
-    };
-    return previewSession;
+    });
   }
   return invoke<Session>('stop_recording', { id });
 }
@@ -220,15 +273,14 @@ export async function stopRecording(id: string): Promise<Session> {
 export async function retryProcessing(id: string): Promise<Session> {
   if (!isNative()) {
     await previewDelay();
-    previewSession = { ...(previewSession ?? previewState()), id, status: 'processing', error: null };
-    return previewSession;
+    return updatePreviewSession({ ...previewSession(id), status: 'processing', error: null });
   }
   return invoke<Session>('retry_processing', { id });
 }
 
 export async function deleteSession(id: string): Promise<void> {
   if (!isNative()) {
-    if (previewSession?.id === id) previewSession = undefined;
+    previewLibrary().delete(id);
     return;
   }
   return invoke<void>('delete_session', { id });
@@ -236,13 +288,13 @@ export async function deleteSession(id: string): Promise<void> {
 
 export async function deleteTranscript(id: string): Promise<Session> {
   if (!isNative()) {
-    const source = previewSession ?? previewState();
-    previewSession = {
+    const source = previewSession(id);
+    return updatePreviewSession({
       ...source,
       id,
       transcript: null,
       enrichedNotes: null,
-      notes: source.notes ?? [source.editedEnrichedNotes ?? source.enrichedNotes, source.originalNotes].filter(Boolean).join("\n\n"),
+      notes: meetingNotes(source),
       editedEnrichedNotes: null,
       aiSuggestions: null,
       dismissedSuggestions: [],
@@ -252,8 +304,7 @@ export async function deleteTranscript(id: string): Promise<Session> {
       liveTranscriptionError: null,
       status: 'draft',
       error: null
-    };
-    return previewSession;
+    });
   }
   return invoke<Session>('delete_transcript', { id });
 }
@@ -274,7 +325,7 @@ export async function saveTranscriptionSettings(settings: TranscriptionSettings)
 }
 
 export async function askMeeting(id: string, question: string, history?: MeetingQuestionTurn[]): Promise<MeetingAnswer> {
-  if (!isNative()) return askMeetings(null, question, history);
+  if (!isNative()) return previewAnswer(`meeting:${id}`, [previewSession(id)], question, history);
   return invoke<MeetingAnswer>('ask_meetings', { folder: null, sessionId: id, question, ...(history ? { history: history.slice(-4) } : {}) });
 }
 
@@ -293,18 +344,8 @@ export async function exportMarkdown(title: string, markdown: string): Promise<s
 
 export async function askMeetings(folder: string | null, question: string, history?: MeetingQuestionTurn[]): Promise<MeetingAnswer> {
   if (!isNative()) {
-    await previewDelay();
-    const source = previewSession ?? previewState();
-    return {
-      answer: '[SIMULATION] The team decided to advance to detailed underwriting while the rent roll and roof report remain open.',
-      citations: [
-        {
-          sessionId: source.id,
-          title: source.title,
-          excerpt: 'Advance to a detailed underwriting review.'
-        }
-      ]
-    };
+    const sources = [...previewLibrary().values()].filter((source) => folder === null || source.folder === folder);
+    return previewAnswer(folder === null ? 'all' : `folder:${folder}`, sources, question, history);
   }
   return invoke<MeetingAnswer>('ask_meetings', { folder, question, ...(history ? { history: history.slice(-4) } : {}) });
 }

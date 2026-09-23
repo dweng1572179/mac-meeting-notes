@@ -161,3 +161,69 @@ test('Note edits, suggestion actions, and refresh preserve exact native meeting 
     ]);
   } finally { delete globalThis.window; }
 });
+
+test('synthetic preview keeps unique meetings isolated through edits, questions, restore and deletion', async () => {
+  globalThis.window = { location: { search: '?key&askDelay=0&meetings=2' } };
+  try {
+    const firstLibrary = await api.bootstrap();
+    const original = firstLibrary.sessions[0];
+    const first = await api.createSession({ title: 'Synthetic first', context: 'First context', attendees: [] });
+    const second = await api.createSession({ title: 'Synthetic second', context: 'Second context', attendees: [] });
+    assert.notEqual(first.id, second.id);
+    await api.saveSession({ ...first, notes: 'First private note', folder: 'First folder' });
+    await api.saveSession({ ...second, notes: 'Second private note', folder: 'Second folder' });
+    let library = await api.bootstrap();
+    assert.equal(library.sessions.find(({ id }) => id === first.id).notes, 'First private note');
+    assert.equal(library.sessions.find(({ id }) => id === original.id).transcript, original.transcript);
+    assert.equal((await api.askMeeting(original.id, 'Explain this')).citations[0].sessionId, original.id);
+    await assert.rejects(api.askMeeting(first.id, 'Draft should match native eligibility'));
+    assert.equal((await api.askMeetings('Planning', 'Explain this')).citations[0].sessionId, 'simulation-harbor-planning');
+    await assert.rejects(api.askMeetings('Missing folder', 'Explain this'));
+    const refreshed = await api.refreshInsights(original.id);
+    assert.ok(refreshed.previousNotes);
+    assert.match(refreshed.notes, /SIMULATION/);
+    await assert.rejects(api.restoreNotes(original.id, 'stale notes'));
+    const restored = await api.restoreNotes(original.id, refreshed.notes);
+    assert.equal(restored.notes, refreshed.previousNotes);
+    assert.equal(restored.previousNotes, refreshed.notes);
+    await api.deleteTranscript(original.id);
+    library = await api.bootstrap();
+    assert.equal(library.sessions.find(({ id }) => id === first.id).notes, 'First private note');
+    await api.deleteSession(first.id);
+    library = await api.bootstrap();
+    assert.equal(library.sessions.some(({ id }) => id === first.id), false);
+    assert.equal(library.sessions.find(({ id }) => id === second.id).notes, 'Second private note');
+    await assert.rejects(api.askMeeting(first.id, 'Deleted source must not resolve'));
+    await assert.rejects(api.saveSession({ ...first, notes: 'Do not resurrect' }));
+  } finally { delete globalThis.window; }
+});
+
+test('synthetic questions can fail once, retry, and finish slowly without pretending to use OpenAI', async () => {
+  globalThis.window = { location: { search: '?key&askError=once&askDelay=0&meetings=2' } };
+  try {
+    const source = (await api.bootstrap()).sessions.find(({ id }) => id === 'simulation-harbor-planning');
+    await assert.rejects(api.askMeeting(source.id, 'Synthetic retry'), /SIMULATION/);
+    const retried = await api.askMeeting(source.id, 'Synthetic retry');
+    assert.match(retried.answer, /SIMULATION/);
+    window.location.search = '?key&askDelay=20&answer=long';
+    let finished = false;
+    const pending = api.askMeeting(source.id, 'Synthetic slow answer').then((answer) => { finished = true; return answer; });
+    await Promise.resolve();
+    assert.equal(finished, false);
+    const long = await pending;
+    assert.ok(long.answer.length > 6000);
+    assert.equal(long.citations[0].sessionId, source.id);
+  } finally { delete globalThis.window; }
+});
+
+test('restoring the prior notes version sends the expected current document to native core', async () => {
+  globalThis.window = {};
+  mockIPC((command, payload) => {
+    assert.equal(command, 'restore_notes');
+    assert.deepEqual(payload, { id: 'one', expectedNotes: 'Current saved document' });
+    return { id: 'one', notes: 'Previous saved document', previousNotes: 'Current saved document' };
+  });
+  try {
+    assert.equal((await api.restoreNotes('one', 'Current saved document')).notes, 'Previous saved document');
+  } finally { delete globalThis.window; }
+});
