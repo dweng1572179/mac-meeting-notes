@@ -892,6 +892,53 @@ mod tests {
     }
 
     #[test]
+    fn a_110_minute_capture_checkpoints_both_tracks_with_bounded_retained_audio() {
+        let directory = Directory::new();
+        let shared = Arc::new(Shared::new());
+        let mut writer = writer(&directory, shared.clone());
+        for minute in 0..110 {
+            for second in 0..60 {
+                let start = (minute * 60 + second) * u64::from(SAMPLE_RATE);
+                for source in [AudioSource::System, AudioSource::Microphone] {
+                    writer.write_packet(packet(source, start, SAMPLE_RATE as usize));
+                }
+            }
+            let sections = shared.take_segments().unwrap();
+            assert_eq!(sections.len(), 2);
+            for section in sections {
+                assert_eq!(section.index, minute);
+                assert_eq!(section.start_seconds, (minute * 60) as f64);
+                assert_eq!(section.duration_seconds, 60.0);
+                assert_eq!(
+                    crate::audio::inspect(&section.path).unwrap().frames,
+                    SECTION_FRAMES
+                );
+                // The live processor removes an audio file only after its text checkpoint is durable.
+                std::fs::remove_file(section.path).unwrap();
+            }
+        }
+        let full_frames = 110 * SECTION_FRAMES;
+        for source in [AudioSource::System, AudioSource::Microphone] {
+            writer.write_packet(packet(source, full_frames, 73));
+        }
+        writer.finish();
+        let tails = shared.take_segments().unwrap();
+        assert_eq!(tails.len(), 2);
+        for tail in tails {
+            assert_eq!(tail.index, 110);
+            assert_eq!(tail.start_seconds, 6_600.0);
+            assert_eq!(crate::audio::inspect(&tail.path).unwrap().frames, 73);
+        }
+        for counter in &shared.counters {
+            assert_eq!(
+                counter.written_frames.load(Ordering::Acquire),
+                full_frames + 73
+            );
+        }
+        assert!(shared.warnings.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_capture_gap_preserves_the_next_sections_true_time() {
         let directory = Directory::new();
         let shared = Arc::new(Shared::new());

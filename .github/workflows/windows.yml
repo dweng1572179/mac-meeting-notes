@@ -21,6 +21,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
       - run: npm ci
       - run: npm test -- --run
       - run: npm run check
@@ -33,7 +34,7 @@ jobs:
           $installers = @(Get-ChildItem src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe)
           if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
           Copy-Item $installers[0].FullName Meeting-Notes-Setup.exe
-      - name: First-install and application launch smoke test
+      - name: Install, reinstall, launch, and saved-data preservation smoke test
         shell: pwsh
         run: ./scripts/check-windows-installer.ps1 -Installer ./Meeting-Notes-Setup.exe
       - uses: actions/upload-artifact@v4
