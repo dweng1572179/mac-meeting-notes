@@ -42,7 +42,7 @@
       await saveApiKey(apiKey);
       apiKey = '';
       onSaved();
-      keyStatus = 'API key saved in your Mac Keychain. You can close settings and continue.';
+      keyStatus = 'API key saved securely on this computer. You can close settings and continue.';
     } catch (error) {
       keyError = true;
       keyStatus = errorMessage(error, 'The API key could not be saved. Try again.');
@@ -103,11 +103,11 @@
 
   <form class="key-form" onsubmit={(event) => { event.preventDefault(); void saveKey(); }}>
     <h3>OpenAI API key</h3>
-    <p class="field-help">{hasApiKey ? 'A key is saved in your Mac Keychain. Enter a new key only to replace it.' : 'Add a key to transcribe recordings and create notes.'}</p>
+    <p class="field-help">{hasApiKey ? 'A key is saved securely on this computer. Enter a new key only to replace it.' : 'Add a key to transcribe recordings and create notes.'}</p>
     <label class="sr-only" for="api-key">API key</label>
     <input bind:this={input} bind:value={apiKey} id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" disabled={savingKey} />
     <div class="preferences-actions">
-      <p class="field-help">Audio, vocabulary, transcripts, and notes go directly to OpenAI when processed. Your key stays in Keychain.</p>
+      <p class="field-help">Audio, vocabulary, transcripts, and notes go directly to OpenAI when processed. Your key stays in your system credential store.</p>
       <button class="save-button" type="submit" disabled={savingKey || !apiKey.trim()}>{savingKey ? 'Checking…' : hasApiKey ? 'Replace key' : 'Save key'}</button>
     </div>
     {#if keyStatus}<p class:error={keyError} class="settings-status" role={keyError ? 'alert' : 'status'}>{keyStatus}</p>{/if}

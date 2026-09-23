@@ -1,11 +1,8 @@
 <script lang="ts">
   import { askMeetings } from './api';
   import { sessionsForFolder, meetingStatusLabel } from './library';
-  import { parseMeetingMarkdown } from './markdown';
-  import InlineMarkdown from './InlineMarkdown.svelte';
-  import QuestionComposer from './QuestionComposer.svelte';
-  import { errorMessage } from './recovery';
-  import type { MeetingAnswer, Session } from './types';
+  import QuestionThread from './QuestionThread.svelte';
+  import type { Session } from './types';
 
   let {
     sessions,
@@ -24,10 +21,6 @@
   } = $props();
 
   let visibleSessions = $derived(sessionsForFolder(sessions, folder));
-  let question = $state('');
-  let exchanges = $state<{ question: string; answer: MeetingAnswer }[]>([]);
-  let asking = $state(false);
-  let askError = $state('');
 
   const meetingTime = (startedAt: string) =>
     new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(
@@ -40,27 +33,6 @@
     return meetingStatusLabel(session);
   }
 
-  async function ask(event?: SubmitEvent) {
-    event?.preventDefault();
-    if (asking) return;
-    const submitted = question.trim();
-    if (!submitted) return;
-    if (!hasApiKey) {
-      onOpenSettings();
-      return;
-    }
-    asking = true;
-    askError = '';
-    try {
-      const answer = await askMeetings(folder, submitted);
-      exchanges = [...exchanges, { question: submitted, answer }];
-      question = '';
-    } catch (error) {
-      askError = errorMessage(error, 'The meeting answer could not be created. Your question is still here; try again.');
-    } finally {
-      asking = false;
-    }
-  }
 </script>
 
 <section class="library-workspace" aria-labelledby="library-title">
@@ -112,35 +84,10 @@
       <h2 id="ask-title">Ask {folder ? `about ${folder}` : 'your meetings'}</h2>
       <span>{folder ? 'From the latest 20 meetings in this folder' : 'From your latest 20 completed meetings'}</span>
     </div>
-    <div class="ask-response" aria-live="polite">
-      {#if exchanges.length}
-        <ol class="library-exchanges" aria-label="Questions and answers">
-          {#each exchanges as exchange}
-            <li>
-              <p class="asked-question" dir="auto">{exchange.question}</p>
-              <div class="answer-copy" dir="auto">
-                {#each parseMeetingMarkdown(exchange.answer.answer) as block}
-                  {#if block.kind === 'heading'}<h3><InlineMarkdown text={block.text} /></h3>
-                  {:else if block.kind === 'bullet'}<p class="answer-bullet"><span aria-hidden="true">•</span><InlineMarkdown text={block.text} /></p>
-                  {:else}<p><InlineMarkdown text={block.text} /></p>{/if}
-                {/each}
-              </div>
-              {#if exchange.answer.citations.length}
-                <details class="library-sources">
-                  <summary>Sources ({exchange.answer.citations.length})</summary>
-                  <ol class="citation-list" aria-label="Meeting sources">
-                    {#each exchange.answer.citations as citation}
-                      <li><button type="button" onclick={() => onSelect(citation.sessionId)}><strong>{citation.title}</strong><span>“{citation.excerpt}”</span></button></li>
-                    {/each}
-                  </ol>
-                </details>
-              {/if}
-            </li>
-          {/each}
-        </ol>
-      {/if}
-    </div>
-    <QuestionComposer id="meeting-question" bind:question {asking} {hasApiKey} onAsk={ask} onInput={() => (askError = '')} />
-    {#if askError}<p class="ask-error" role="alert">{askError}</p>{/if}
+    {#key folder}
+      <QuestionThread id="meeting-question" scope={folder === null ? 'all' : `folder:${folder}`} sourceIds={visibleSessions.filter((session) => session.status !== 'draft').map((session) => session.id)} {hasApiKey} {onOpenSettings}
+        onAsk={(question, history) => askMeetings(folder, question, history)} onSelectSource={onSelect}
+        starters={['Summarize the main themes.', 'What changed across these meetings?']} />
+    {/key}
   </aside>
 </section>

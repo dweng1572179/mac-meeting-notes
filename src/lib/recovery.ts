@@ -1,11 +1,16 @@
 import type { Session } from './types';
+import { currentPlatform, type Platform } from './platform';
 
-export function errorMessage(error: unknown, fallback = 'The action could not be completed.'): string {
+export function errorMessage(error: unknown, fallback = 'The action could not be completed.', platform: Platform = currentPlatform()): string {
   const detail = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
     ? error.message : typeof error === 'string' && error.trim() ? error : fallback;
   const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
-  if (code === 'microphone_permission') return `${detail} Open System Settings → Privacy & Security → Microphone, enable Meeting Notes, then try again.`;
-  if (code === 'audio_permission') return `${detail} Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Meeting Notes, then try again.`;
+  if (code === 'microphone_permission') {
+    if (platform === 'mac') return `${detail} Open System Settings → Privacy & Security → Microphone, enable Meeting Notes, then try again.`;
+    if (platform === 'windows') return `${detail} Open Windows Settings → Privacy & security → Microphone and allow desktop apps to access your microphone, then try again.`;
+    return `${detail} Allow microphone access in your system privacy settings, then try again.`;
+  }
+  if (code === 'audio_permission' && platform === 'mac') return `${detail} Open System Settings → Privacy & Security → Screen & System Audio Recording, enable Meeting Notes, then try again.`;
   return detail;
 }
 

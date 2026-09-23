@@ -20,6 +20,7 @@ pub fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::save_session,
             commands::insights::apply_suggestion,
             commands::insights::refresh_insights,
+            commands::insights::restore_notes,
             commands::start_recording,
             commands::stop_recording,
             commands::recording_health,

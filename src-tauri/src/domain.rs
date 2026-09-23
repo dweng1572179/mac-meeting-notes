@@ -88,12 +88,16 @@ pub struct Session {
     pub folder: String,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
+    pub previous_notes: Option<String>,
     pub original_notes: String,
     pub transcript: Option<String>,
     pub enriched_notes: Option<String>,
     pub status: SessionStatus,
     pub error: Option<AppError>,
     pub audio_path: Option<String>,
+    #[serde(default)]
+    pub audio_format: AudioFormat,
     #[serde(default)]
     pub microphone_audio_path: Option<String>,
     #[serde(default)]
@@ -123,6 +127,31 @@ pub struct Session {
 pub enum AudioSource {
     System,
     Microphone,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioFormat {
+    #[default]
+    M4a,
+    Wav,
+}
+
+impl AudioFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::M4a => "m4a",
+            Self::Wav => "wav",
+        }
+    }
+
+    pub fn for_recording() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::Wav
+        } else {
+            Self::M4a
+        }
+    }
 }
 
 impl AudioSource {
@@ -191,6 +220,12 @@ pub struct MeetingAnswer {
     pub citations: Vec<MeetingCitation>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionTurn {
+    pub question: String,
+    pub answer: String,
+}
+
 pub type AppResult<T> = Result<T, AppError>;
 
 impl AppError {
@@ -220,11 +255,13 @@ impl Session {
             folder: String::new(),
             original_notes: String::new(),
             notes: None,
+            previous_notes: None,
             transcript: None,
             enriched_notes: None,
             status: SessionStatus::Draft,
             error: None,
             audio_path: None,
+            audio_format: AudioFormat::M4a,
             microphone_audio_path: None,
             transcription: Vec::new(),
             transcription_settings: TranscriptionSettings::default(),
@@ -266,6 +303,10 @@ impl Session {
         }
         // A response must never replace edits made while its request was in flight.
         let current = self.notes();
+        if current == source_notes && current != notes {
+            // One reversible prior document, saved atomically with its replacement.
+            self.previous_notes = Some(current.clone());
+        }
         self.notes = Some(if current == source_notes {
             notes.clone()
         } else {

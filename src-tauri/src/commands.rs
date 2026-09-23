@@ -11,8 +11,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     domain::{
-        transition_to_failed, transition_to_processing, AppError, AppResult, AudioSource,
-        CreateSessionInput, MeetingAnswer, Session, SessionStatus, SourceTranscript,
+        transition_to_failed, transition_to_processing, AppError, AppResult, AudioFormat,
+        AudioSource, CreateSessionInput, MeetingAnswer, Session, SessionStatus, SourceTranscript,
         TranscriptChunk, TranscriptionSettings, UpdateSessionInput,
     },
     openai::{sections_to_markdown, OpenAiClient},
@@ -157,7 +157,8 @@ pub fn start_recording(
     state: State<'_, AppState>,
     id: String,
 ) -> AppResult<RecordingInfo> {
-    let (system_path, microphone_path) = audio_paths(&app, &id)?;
+    let audio_format = AudioFormat::for_recording();
+    let (system_path, microphone_path) = audio_paths(&app, &id, audio_format)?;
     // Save the capture format before opening files so interrupted startup is recoverable.
     {
         let _guard = lock_sessions(&state)?;
@@ -166,6 +167,7 @@ pub fn start_recording(
             return Err(invalid_status("Only a draft session can start recording"));
         }
         session.segmented_capture = true;
+        session.audio_format = audio_format;
         state.store.save(&session)?;
     }
     let recording = start_recording_state(
@@ -207,17 +209,24 @@ fn start_recording_state(
 
     state
         .store
-        .validate_audio_path(id, &system_path.to_string_lossy())?;
-    state
-        .store
-        .validate_microphone_audio_path(id, &microphone_path.to_string_lossy())?;
+        .validate_audio_path(id, &system_path.to_string_lossy(), session.audio_format)?;
+    state.store.validate_microphone_audio_path(
+        id,
+        &microphone_path.to_string_lossy(),
+        session.audio_format,
+    )?;
     if let Some(parent) = system_path.parent() {
         fs::create_dir_all(parent).map_err(storage_error)?;
     }
     let recording = match start(&session.id, &system_path, &microphone_path) {
         Ok(recording) => recording,
         Err(error) => {
-            if session.segmented_capture && !state.store.segment_files(id)?.is_empty() {
+            if session.segmented_capture
+                && !state
+                    .store
+                    .segment_files(id, session.audio_format)?
+                    .is_empty()
+            {
                 update_processing(state, id, |session| {
                     session.status = SessionStatus::Failed;
                     session.error = Some(error.clone());
@@ -236,12 +245,16 @@ fn start_recording_state(
     ) {
         let _ = state.recorder.stop(&session.id);
         for path in [
-            state
-                .store
-                .validate_audio_path(id, &system_path.to_string_lossy()),
-            state
-                .store
-                .validate_microphone_audio_path(id, &microphone_path.to_string_lossy()),
+            state.store.validate_audio_path(
+                id,
+                &system_path.to_string_lossy(),
+                session.audio_format,
+            ),
+            state.store.validate_microphone_audio_path(
+                id,
+                &microphone_path.to_string_lossy(),
+                session.audio_format,
+            ),
         ]
         .into_iter()
         .flatten()
@@ -340,6 +353,7 @@ pub async fn ask_meetings(
     folder: Option<String>,
     question: String,
     session_id: Option<String>,
+    history: Option<Vec<crate::domain::QuestionTurn>>,
 ) -> AppResult<MeetingAnswer> {
     let question = validate_question(&question)?;
     let sessions = {
@@ -350,7 +364,12 @@ pub async fn ask_meetings(
         .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
     state
         .openai
-        .ask_meetings(&sessions, question, &api_key)
+        .ask_meetings_with_history(
+            &sessions,
+            question,
+            &api_key,
+            history.as_deref().unwrap_or_default(),
+        )
         .await
 }
 
@@ -508,6 +527,7 @@ fn run_processing_worker(
     let mut paused: Option<AppError> = None;
     let mut retry_after: Option<Duration> = None;
     let mut retries = 0;
+    let mut was_recording = false;
     loop {
         let session = load_session(state, id)?;
         if !matches!(
@@ -516,6 +536,12 @@ fn run_processing_worker(
         ) {
             return Ok(session);
         }
+        // Stop should not inherit a long live backoff. Make a fresh, bounded final attempt.
+        if was_recording && session.status == SessionStatus::Processing && retry_after.is_some() {
+            retries = 0;
+            retry_after = Some(Duration::ZERO);
+        }
+        was_recording = session.status == SessionStatus::Recording;
         if let Some(error) = paused.as_ref() {
             match retry_after {
                 Some(remaining) if !remaining.is_zero() => {
@@ -563,12 +589,17 @@ fn run_processing_worker(
                 ) {
                     [2, 4, 8]
                         .get(retries)
-                        .map(|seconds| Duration::from_secs(*seconds))
+                        .copied()
+                        .or_else(|| {
+                            (session.status == SessionStatus::Recording)
+                                .then_some(if retries == 3 { 30 } else { 60 })
+                        })
+                        .map(Duration::from_secs)
                 } else {
                     None
                 };
                 if retry_after.is_some() {
-                    retries += 1;
+                    retries = (retries + 1).min(4);
                 }
                 // Do not transition to Failed if Stop wins the race with a retryable error.
                 progress(update_processing(state, id, |session| {
@@ -800,7 +831,7 @@ async fn transcribe_source(
         let chunk = track.chunks[index].clone();
         let input = source_path(state, &session, source)?
             .ok_or_else(|| AppError::new("audio_file", "Untranscribed source audio is unavailable. Your saved notes and transcript progress were kept."))?;
-        let output = state.store.chunk_path(id, source)?;
+        let output = state.store.chunk_path(id, source, session.audio_format)?;
         remove_audio_file(output.clone())?;
         // Native decode/encode runs off the UI thread, with bounded PCM buffers and no capture-time rotation.
         let output_for_write = output.clone();
@@ -837,7 +868,7 @@ async fn transcribe_source(
                     session.transcript = assembled_transcript(&session.transcription);
                 })?;
                 // Only the durable checkpoint permits deletion; the full source stays until every chunk is saved.
-                remove_audio_file(state.store.chunk_path(id, source)?)?;
+                remove_audio_file(state.store.chunk_path(id, source, session.audio_format)?)?;
                 progress(saved);
             }
             Err(error) if error.code == "transcription_too_long" && length > 30.0 => {
@@ -893,7 +924,7 @@ fn cleanup_source(state: &AppState, id: &str, source: AudioSource) -> AppResult<
     if let Some(path) = source_path(state, &session, source)? {
         remove_audio_file(path)?;
     }
-    remove_audio_file(state.store.chunk_path(id, source)?)?;
+    remove_audio_file(state.store.chunk_path(id, source, session.audio_format)?)?;
     match source {
         AudioSource::System => session.audio_path = None,
         AudioSource::Microphone => session.microphone_audio_path = None,
@@ -1136,9 +1167,20 @@ fn delete_transcript_state(state: &AppState, id: &str) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
     ensure_processing_idle(state, id)?;
     let mut session = state.store.get(id)?;
-    if session.segmented_capture && !state.store.segment_files(id)?.is_empty() {
+    if session.segmented_capture
+        && !state
+            .store
+            .segment_files(id, session.audio_format)?
+            .is_empty()
+    {
         // The base path is the retained-source marker; numbered paths remain derived by the store.
-        session.audio_path = Some(state.store.audio_path(id)?.to_string_lossy().into_owned());
+        session.audio_path = Some(
+            state
+                .store
+                .audio_path(id, session.audio_format)?
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     let session = transcript_deleted(session)?;
     state.store.save(&session)?;
@@ -1193,10 +1235,10 @@ fn remove_retained_audio(state: &AppState, id: &str) -> AppResult<Session> {
         retained_microphone_audio_path(state, &session)?,
     ];
     for source in [AudioSource::System, AudioSource::Microphone] {
-        remove_audio_file(state.store.chunk_path(id, source)?)?;
+        remove_audio_file(state.store.chunk_path(id, source, session.audio_format)?)?;
     }
     if session.segmented_capture {
-        for (_, _, path) in state.store.segment_files(id)? {
+        for (_, _, path) in state.store.segment_files(id, session.audio_format)? {
             remove_audio_file(path)?;
         }
     }
@@ -1237,13 +1279,15 @@ pub fn recover_interrupted_sessions(store: &SessionStore) -> AppResult<()> {
             SessionStatus::Recording | SessionStatus::Processing
         ) || (session.status == SessionStatus::Draft
             && session.segmented_capture
-            && !store.segment_files(&session.id)?.is_empty())
+            && !store
+                .segment_files(&session.id, session.audio_format)?
+                .is_empty())
         {
             let mut session = session;
             if session.segmented_capture {
                 session.audio_path = Some(
                     store
-                        .audio_path(&session.id)?
+                        .audio_path(&session.id, session.audio_format)?
                         .to_string_lossy()
                         .into_owned(),
                 );
@@ -1286,14 +1330,14 @@ pub fn interrupted_recording(session: Session, paths: RecordingFiles) -> AppResu
     stopped_session(session, paths).map(recover_interrupted)
 }
 
-fn audio_paths(app: &AppHandle, id: &str) -> AppResult<(PathBuf, PathBuf)> {
+fn audio_paths(app: &AppHandle, id: &str, format: AudioFormat) -> AppResult<(PathBuf, PathBuf)> {
     app.path()
         .app_data_dir()
         .map(|root| {
             let audio = root.join("audio");
             (
-                audio.join(format!("{id}.m4a")),
-                audio.join(format!("{id}-mic.m4a")),
+                audio.join(format!("{id}.{}", format.extension())),
+                audio.join(format!("{id}-mic.{}", format.extension())),
             )
         })
         .map_err(|error| AppError::new("storage_error", error.to_string()))
@@ -1303,7 +1347,11 @@ fn retained_audio_path(state: &AppState, session: &Session) -> AppResult<Option<
     session
         .audio_path
         .as_deref()
-        .map(|saved| state.store.validate_audio_path(&session.id, saved))
+        .map(|saved| {
+            state
+                .store
+                .validate_audio_path(&session.id, saved, session.audio_format)
+        })
         .transpose()
 }
 
@@ -1317,7 +1365,7 @@ fn retained_microphone_audio_path(
         .map(|saved| {
             state
                 .store
-                .validate_microphone_audio_path(&session.id, saved)
+                .validate_microphone_audio_path(&session.id, saved, session.audio_format)
         })
         .transpose()
 }
@@ -1356,9 +1404,10 @@ mod tests {
         time::Duration,
     };
 
+    #[cfg(unix)]
+    use crate::recorder::RecordingFiles;
     use crate::{
         domain::{AppError, CreateSessionInput, Session, SessionStatus, UpdateSessionInput},
-        recorder::RecordingFiles,
         store::SessionStore,
     };
 
@@ -1647,14 +1696,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attempts.get(), 2);
-        assert_eq!(waited.get(), Duration::from_secs(2));
+        assert_eq!(waited.get(), Duration::from_millis(500));
         assert_eq!(complete.status, SessionStatus::Complete);
         assert!(complete.live_transcription_error.is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn worker_caps_transient_retries_and_never_retries_permanent_errors() {
+    fn worker_caps_final_retries_and_never_retries_permanent_errors() {
         use std::cell::Cell;
         for (code, expected_attempts, expected_delay) in [
             ("openai_timeout", 4, 14),
@@ -1665,6 +1714,19 @@ mod tests {
         ] {
             for initial_status in [SessionStatus::Recording, SessionStatus::Processing] {
                 let (state, root, id) = state(initial_status.clone());
+                let stop_after = expected_attempts;
+                let final_retry =
+                    initial_status == SessionStatus::Recording && code == "openai_timeout";
+                let expected_attempts = if final_retry {
+                    expected_attempts * 2
+                } else {
+                    expected_attempts
+                };
+                let expected_delay = if final_retry {
+                    expected_delay * 2
+                } else {
+                    expected_delay
+                };
                 let attempts = Cell::new(0);
                 let waited = Cell::new(Duration::ZERO);
                 let error = super::run_processing_worker(
@@ -1678,7 +1740,9 @@ mod tests {
                     &|_| {},
                     |delay| {
                         waited.set(waited.get() + delay);
-                        if attempts.get() == expected_attempts {
+                        if attempts.get() == stop_after
+                            && state.store.get(&id).unwrap().status == SessionStatus::Recording
+                        {
                             let saved = state.store.get(&id).unwrap();
                             assert_eq!(saved.status, SessionStatus::Recording);
                             assert_eq!(saved.live_transcription_error.unwrap().code, code);
@@ -1967,6 +2031,6 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 #[path = "processing_tests.rs"]
 mod processing_tests;

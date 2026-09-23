@@ -37,7 +37,7 @@ describe('elapsedRecordingSeconds', () => {
 
 describe('captureErrorMessage', () => {
   it('points microphone failures to the microphone privacy setting', () => {
-    expect(captureErrorMessage({ code: 'microphone_permission', message: 'Permission denied' })).toContain(
+    expect(captureErrorMessage({ code: 'microphone_permission', message: 'Permission denied' }, undefined, 'mac')).toContain(
       'Privacy & Security → Microphone'
     );
   });
@@ -52,7 +52,7 @@ describe('captureErrorMessage', () => {
   });
 
   it('points system-audio permission failures to the system-audio privacy setting', () => {
-    expect(captureErrorMessage({ code: 'audio_permission', message: 'Permission denied' })).toContain(
+    expect(captureErrorMessage({ code: 'audio_permission', message: 'Permission denied' }, undefined, 'mac')).toContain(
       'Screen & System Audio Recording'
     );
   });

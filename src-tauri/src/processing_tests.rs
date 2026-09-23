@@ -36,6 +36,7 @@ impl Fixture {
             attendees: vec![],
         });
         session.status = SessionStatus::Processing;
+        session.audio_format = AudioFormat::Wav;
         session.original_notes = "[SIMULATION] Keep my emphasis and typed notes.".into();
         store.save(&session).unwrap();
         Self {
@@ -50,65 +51,33 @@ impl Fixture {
     }
     fn source(&self, microphone: bool, seconds: u32, silent: bool) -> PathBuf {
         let path = self.root.join("audio").join(format!(
-            "{}{}.m4a",
+            "{}{}.wav",
             self.id,
             if microphone { "-mic" } else { "" }
         ));
-        if seconds == 0 {
-            use objc2_core_audio_types::*;
-            let pcm = AudioStreamBasicDescription {
-                mSampleRate: 16_000.0,
-                mFormatID: kAudioFormatLinearPCM,
-                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-                mBytesPerPacket: 4,
-                mFramesPerPacket: 1,
-                mBytesPerFrame: 4,
-                mChannelsPerFrame: 1,
-                mBitsPerChannel: 32,
-                mReserved: 0,
-            };
-            let file = crate::recorder::native::create_audio_file(&path, &pcm).unwrap();
-            crate::recorder::native::set_client_format(file, &pcm).unwrap();
-            assert_eq!(unsafe { objc2_audio_toolbox::ExtAudioFileDispose(file) }, 0);
-        } else {
-            let wav = path.with_extension("wav");
-            let frames = seconds * 16_000;
-            let mut file = fs::File::create(&wav).unwrap();
-            file.write_all(b"RIFF").unwrap();
-            file.write_all(&(36 + frames * 2).to_le_bytes()).unwrap();
-            file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x01\0").unwrap();
-            file.write_all(&16_000u32.to_le_bytes()).unwrap();
-            file.write_all(&32_000u32.to_le_bytes()).unwrap();
-            file.write_all(b"\x02\0\x10\0data").unwrap();
-            file.write_all(&(frames * 2).to_le_bytes()).unwrap();
-            let block: Vec<u8> = (0..16_000)
-                .flat_map(|i| {
-                    let sample = if silent {
-                        0
-                    } else {
-                        ((i as f64 * std::f64::consts::TAU * 440.0 / 16_000.0).sin() * 8000.0)
-                            as i16
-                    };
-                    sample.to_le_bytes()
-                })
-                .collect();
-            for _ in 0..seconds {
-                file.write_all(&block).unwrap();
-            }
-            drop(file);
-            let result = std::process::Command::new("/usr/bin/afconvert")
-                .args(["-f", "m4af", "-d", "aac", "-b", "32000"])
-                .arg(&wav)
-                .arg(&path)
-                .output()
-                .unwrap();
-            assert!(
-                result.status.success(),
-                "afconvert: {}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-            fs::remove_file(wav).unwrap();
+        let frames = seconds * 16_000;
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + frames * 2).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt \x10\0\0\0\x01\0\x01\0").unwrap();
+        file.write_all(&16_000u32.to_le_bytes()).unwrap();
+        file.write_all(&32_000u32.to_le_bytes()).unwrap();
+        file.write_all(b"\x02\0\x10\0data").unwrap();
+        file.write_all(&(frames * 2).to_le_bytes()).unwrap();
+        let block: Vec<u8> = (0..16_000)
+            .flat_map(|i| {
+                let sample = if silent {
+                    0
+                } else {
+                    ((i as f64 * std::f64::consts::TAU * 440.0 / 16_000.0).sin() * 8000.0) as i16
+                };
+                sample.to_le_bytes()
+            })
+            .collect();
+        for _ in 0..seconds {
+            file.write_all(&block).unwrap();
         }
+        drop(file);
         let store = SessionStore::new(self.root.clone());
         let mut session = store.get(&self.id).unwrap();
         if microphone {
@@ -144,7 +113,7 @@ fn finalized_section_is_checkpointed_before_recording_stops_without_enrichment()
     let path = fixture
         .root
         .join("audio")
-        .join(format!("{}-system-segment-00000000.m4a", fixture.id));
+        .join(format!("{}-system-segment-00000000.wav", fixture.id));
     fs::rename(input, &path).unwrap();
     let (url, server) = server(
         vec![text_response("[SIMULATION] Words saved while recording.")],
@@ -409,6 +378,7 @@ fn valid_system_and_silent_microphone_complete_without_inventing_speech() {
     assert!(complete.transcript.unwrap().contains("SYSTEM_WORDS"));
 }
 
+#[cfg(unix)]
 #[test]
 fn transcript_checkpoint_storage_failure_keeps_notes_and_source_audio() {
     use std::os::unix::fs::PermissionsExt;
@@ -435,6 +405,57 @@ fn transcript_checkpoint_storage_failure_keeps_notes_and_source_audio() {
         .unwrap()
         .original_notes
         .contains("Keep my emphasis"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_checkpoint_replace_failure_keeps_prior_words_and_pending_audio() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let fixture = Fixture::new();
+    let audio = fixture.source(false, 301, false);
+    let checkpoint = fixture
+        .root
+        .join("sessions")
+        .join(format!("{}.json", fixture.id));
+    let held = Arc::new(Mutex::new(None));
+    let server_held = Arc::clone(&held);
+    let (url, requests) = server(
+        vec![
+            text_response("DURABLY_SAVED"),
+            text_response("NOT_DURABLY_SAVED"),
+        ],
+        move |index| {
+            if index == 1 {
+                // Permit checkpoint reads, but deny replacement until the assertion phase.
+                *server_held.lock().unwrap() = Some(
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(1)
+                        .open(&checkpoint)
+                        .unwrap(),
+                );
+            }
+        },
+    );
+    let state = fixture.state(&url);
+    let error = tauri::async_runtime::block_on(process_session_with_key(
+        &state,
+        &fixture.id,
+        "test-key",
+        |_| {},
+    ))
+    .unwrap_err();
+    assert_eq!(requests.join().unwrap().len(), 2);
+    assert_eq!(error.code, "storage_error");
+    held.lock().unwrap().take();
+    let saved = state.store.get(&fixture.id).unwrap();
+    assert_eq!(
+        saved.transcription[0].chunks[0].transcript.as_deref(),
+        Some("DURABLY_SAVED")
+    );
+    assert!(saved.transcription[0].chunks[1].transcript.is_none());
+    assert!(saved.original_notes.contains("Keep my emphasis"));
+    assert!(audio.exists());
 }
 
 #[test]
@@ -524,7 +545,10 @@ fn reopen_after_final_checkpoint_cleans_scratch_and_reports_silent_source() {
     state.store.save(&saved).unwrap();
     for source in [AudioSource::System, AudioSource::Microphone] {
         fs::write(
-            state.store.chunk_path(&fixture.id, source).unwrap(),
+            state
+                .store
+                .chunk_path(&fixture.id, source, AudioFormat::Wav)
+                .unwrap(),
             b"saved chunk scratch",
         )
         .unwrap();
@@ -601,6 +625,7 @@ fn deleting_transcript_retains_audio_without_allowing_recording_to_overwrite_it(
     assert!(complete.warnings.contains(&saved.warnings[0]));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Uses paid OpenAI API and requires authorized login Keychain access"]
 fn live_synthetic_long_recording_with_openai() {
@@ -646,6 +671,7 @@ fn live_synthetic_long_recording_with_openai() {
     let mut state = fixture.state("https://api.openai.com/v1");
     state.openai = OpenAiClient::new();
     let mut session = state.store.get(&fixture.id).unwrap();
+    session.audio_format = AudioFormat::M4a;
     session.audio_path = Some(audio.to_string_lossy().into());
     session.transcription_settings = crate::domain::TranscriptionSettings {
         language: "en".into(),
@@ -858,7 +884,7 @@ fn invalid_speaker_timing_does_not_block_either_processing_path() {
             let source_path = if segmented {
                 let path = state
                     .store
-                    .segment_path(&fixture.id, AudioSource::System, 0)
+                    .segment_path(&fixture.id, AudioSource::System, 0, AudioFormat::Wav)
                     .unwrap();
                 fs::rename(input, &path).unwrap();
                 session.audio_path = None;

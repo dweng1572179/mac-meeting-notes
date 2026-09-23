@@ -152,7 +152,7 @@
     </button>
   </div>
   {#if session.liveTranscriptionError}
-    <p class="live-transcription-warning" role="status">Recording continues. {session.liveTranscriptionError.message} Temporary connection or service errors get up to three automatic retries. If processing stays paused, stop and resume it; your audio is kept.</p>
+    <p class="live-transcription-warning" role="status">Recording continues. {session.liveTranscriptionError.message} Temporary connection or service errors retry automatically with pauses of up to a minute. Other errors need attention after you stop; your audio is kept.</p>
   {/if}
 {:else if session.status === 'processing'}
   <div class="recording-dock processing" role="status" aria-live="polite">
@@ -180,7 +180,7 @@
   </div>
 {:else if session.status === 'draft'}
   <div class="recording-readiness">
-    <p>Captures your microphone and Mac audio, and transcribes during the meeting. Connect your headphones before starting.</p>
+    <p>Captures your microphone and computer audio, and transcribes during the meeting. Connect your headphones before starting.</p>
     <div class="recording-dock draft">
       <button class="start-meeting" type="button" disabled={pending !== null} onclick={start}>
         <span aria-hidden="true"></span>

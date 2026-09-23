@@ -31,7 +31,7 @@ it('distinguishes parked section failures from uploads still in progress', () =>
 describe('error recovery', () => {
   it('keeps structured backend details and adds only relevant permission guidance', () => {
     expect(errorMessage({ code: 'rate_limit', message: 'Try later. Request ID: req_123' })).toBe('Try later. Request ID: req_123');
-    expect(errorMessage({ code: 'microphone_permission', message: 'Microphone denied.' })).toContain('Privacy & Security → Microphone');
+    expect(errorMessage({ code: 'microphone_permission', message: 'Microphone denied.' }, undefined, 'mac')).toContain('Privacy & Security → Microphone');
     expect(errorMessage(new Error('Connection lost'))).toBe('Connection lost');
   });
 

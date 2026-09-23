@@ -15,6 +15,7 @@
   import SettingsDialog from './lib/SettingsDialog.svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import { errorMessage } from './lib/recovery';
+  import { questionConversations } from './lib/questions';
   import type { RecordingHealth, Session, TranscriptionSettings } from './lib/types';
   import { captureCoverage } from './lib/RecordingDock.svelte';
 
@@ -56,6 +57,7 @@
   let editor = $state<{ flush: () => Promise<void> } | undefined>();
   let recordingBaselines = $state<Record<string, number>>({});
   let selected = $derived(sessions.find((session) => session.id === selectedId) ?? null);
+  let availableFolders = $derived([...new Set(sessions.map((session) => session.folder).filter(Boolean))].sort());
 
   async function loadLibrary() {
     loading = true;
@@ -135,11 +137,13 @@
 
   async function removeTranscript(id: string) {
     if (id === selectedId) await editor?.flush();
+    questionConversations.deleteForMeeting(id);
     updateSession(await deleteTranscript(id));
   }
 
   async function removeMeeting(id: string) {
     if (id === selectedId) await editor?.flush();
+    questionConversations.deleteForMeeting(id);
     await deleteSession(id);
     sessions = sessions.filter((session) => session.id !== id);
     if (id === selectedId) selectedId = null;
@@ -149,6 +153,7 @@
     const { [id]: _removed, ...active } = recordingBaselines;
     recordingBaselines = active;
   }
+
 </script>
 
 <div class="app-shell">
@@ -172,7 +177,7 @@
           <div role="alert">
             {#if healthError}<p>{healthError}</p>{/if}
             {#each health?.warnings ?? [] as warning}<p>{warning}</p>{/each}
-            <p>A quiet source may produce no frames. If speech is expected, check your selected microphone and macOS audio permissions. Stop recording before updating the app.</p>
+            <p>A quiet source may produce no frames. If speech is expected, check your selected microphone and system audio permissions. Stop recording before updating the app.</p>
           </div>
         {/if}
         {#if selectedId !== recordingId}
@@ -191,6 +196,7 @@
         <MeetingEditor
           bind:this={editor}
           session={selected}
+          {availableFolders}
           {hasApiKey}
           health={selected.id === recordingId ? health : null}
           recordingStartedAt={recordingBaselines[selected.id] ?? null}
