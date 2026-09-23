@@ -31,6 +31,7 @@ export type Session = {
   attendees: string[];
   folder: string;
   notes?: string | null;
+  previousNotes?: string | null;
   originalNotes: string;
   transcript: string | null;
   enrichedNotes: string | null;

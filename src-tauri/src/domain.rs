@@ -88,6 +88,8 @@ pub struct Session {
     pub folder: String,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
+    pub previous_notes: Option<String>,
     pub original_notes: String,
     pub transcript: Option<String>,
     pub enriched_notes: Option<String>,
@@ -137,11 +139,18 @@ pub enum AudioFormat {
 
 impl AudioFormat {
     pub fn extension(self) -> &'static str {
-        match self { Self::M4a => "m4a", Self::Wav => "wav" }
+        match self {
+            Self::M4a => "m4a",
+            Self::Wav => "wav",
+        }
     }
 
     pub fn for_recording() -> Self {
-        if cfg!(target_os = "windows") { Self::Wav } else { Self::M4a }
+        if cfg!(target_os = "windows") {
+            Self::Wav
+        } else {
+            Self::M4a
+        }
     }
 }
 
@@ -246,6 +255,7 @@ impl Session {
             folder: String::new(),
             original_notes: String::new(),
             notes: None,
+            previous_notes: None,
             transcript: None,
             enriched_notes: None,
             status: SessionStatus::Draft,
@@ -293,6 +303,10 @@ impl Session {
         }
         // A response must never replace edits made while its request was in flight.
         let current = self.notes();
+        if current == source_notes && current != notes {
+            // One reversible prior document, saved atomically with its replacement.
+            self.previous_notes = Some(current.clone());
+        }
         self.notes = Some(if current == source_notes {
             notes.clone()
         } else {

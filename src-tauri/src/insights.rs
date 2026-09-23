@@ -21,6 +21,45 @@ pub fn refresh_insights(
     Ok(session)
 }
 
+#[tauri::command]
+pub fn restore_notes(
+    state: State<'_, AppState>,
+    id: String,
+    expected_notes: String,
+) -> AppResult<Session> {
+    restore_notes_state(&state, &id, &expected_notes)
+}
+
+fn restore_notes_state(state: &AppState, id: &str, expected_notes: &str) -> AppResult<Session> {
+    let _guard = lock_sessions(state)?;
+    let mut session = state.store.get(id)?;
+    if matches!(
+        session.status,
+        SessionStatus::Recording | SessionStatus::Processing
+    ) {
+        return Err(invalid_status(
+            "Wait until recording and processing finish before restoring notes",
+        ));
+    }
+    let current = session.notes();
+    if current != expected_notes {
+        return Err(AppError::new(
+            "notes_changed",
+            "Your notes changed. Review the current document before restoring.",
+        ));
+    }
+    let previous = session.previous_notes.take().ok_or_else(|| {
+        AppError::new(
+            "no_previous_notes",
+            "There is no previous notes document to restore",
+        )
+    })?;
+    session.notes = Some(previous);
+    session.previous_notes = Some(current);
+    state.store.save(&session)?;
+    Ok(session)
+}
+
 fn apply_suggestion_state(
     state: &AppState,
     id: &str,
@@ -298,5 +337,67 @@ mod tests {
         fixture.state.store.save(&invalid).unwrap();
         assert!(apply_suggestion_state(&fixture.state, &fixture.id, "title", "apply").is_err());
         assert_eq!(fixture.saved(), invalid);
+    }
+
+    #[test]
+    fn restore_swaps_documents_durably_without_changing_meeting_data() {
+        let fixture = Fixture::new();
+        let mut original = fixture.saved();
+        original.notes = Some("My current refinements".into());
+        original.previous_notes = Some(String::new());
+        fixture.state.store.save(&original).unwrap();
+        let restored =
+            restore_notes_state(&fixture.state, &fixture.id, "My current refinements").unwrap();
+        let mut expected = original.clone();
+        expected.notes = Some(String::new());
+        expected.previous_notes = Some("My current refinements".into());
+        assert_eq!(fixture.saved(), expected);
+        assert_eq!(restored, expected);
+        assert_eq!(
+            restore_notes_state(&fixture.state, &fixture.id, "").unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn restore_rejects_stale_missing_and_active_documents_without_mutation() {
+        let fixture = Fixture::new();
+        let original = fixture.saved();
+        assert!(restore_notes_state(&fixture.state, &fixture.id, &original.notes()).is_err());
+        assert_eq!(fixture.saved(), original);
+        let mut saved = original;
+        saved.notes = Some("Current".into());
+        saved.previous_notes = Some("Previous".into());
+        fixture.state.store.save(&saved).unwrap();
+        assert_eq!(
+            restore_notes_state(&fixture.state, &fixture.id, "Stale")
+                .unwrap_err()
+                .code,
+            "notes_changed"
+        );
+        assert_eq!(fixture.saved(), saved);
+        for status in [SessionStatus::Recording, SessionStatus::Processing] {
+            saved.status = status;
+            fixture.state.store.save(&saved).unwrap();
+            assert!(restore_notes_state(&fixture.state, &fixture.id, "Current").is_err());
+            assert_eq!(fixture.saved(), saved);
+        }
+    }
+
+    #[test]
+    fn failed_restore_checkpoint_keeps_both_saved_documents() {
+        let fixture = Fixture::new();
+        let mut saved = fixture.saved();
+        saved.notes = Some("Current".into());
+        saved.previous_notes = Some("Previous".into());
+        fixture.state.store.save(&saved).unwrap();
+        // An invalid temporary destination makes atomic_write fail on both platforms.
+        let blocked = fixture
+            .root
+            .join("sessions")
+            .join(format!("{}.json.tmp", fixture.id));
+        fs::create_dir(&blocked).unwrap();
+        assert!(restore_notes_state(&fixture.state, &fixture.id, "Current").is_err());
+        assert_eq!(fixture.saved(), saved);
     }
 }

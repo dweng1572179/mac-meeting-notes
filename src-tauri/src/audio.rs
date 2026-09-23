@@ -51,7 +51,10 @@ pub fn write_chunk(
             "Invalid audio chunk time range",
         ));
     }
-    if output.extension().is_some_and(|extension| extension == "wav") {
+    if output
+        .extension()
+        .is_some_and(|extension| extension == "wav")
+    {
         return wav::write_chunk(input, output, start_seconds, duration_seconds);
     }
     #[cfg(target_os = "macos")]

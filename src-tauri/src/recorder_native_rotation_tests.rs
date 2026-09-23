@@ -184,18 +184,23 @@ fn callbacks_crossing_rotation_boundaries_keep_every_accepted_frame() {
     let mut segments = Vec::new();
     let callback = recording.callback.as_ref().unwrap();
     let writer = recording.system_segments.as_mut().unwrap();
+    // Coordinate batches, not codec timing: under load the first AAC sink can take
+    // longer to prepare than the entire old sleep-based producer run.
+    let boundary = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         let producer = scope.spawn(|| {
-            for _ in 0..100 {
-                feed(callback, 512, 500.0);
-                std::thread::sleep(Duration::from_micros(100));
+            for _ in 0..10 {
+                boundary.wait();
+                feed(callback, 5_120, 500.0);
+                boundary.wait();
             }
         });
         for _ in 0..10 {
+            boundary.wait();
             if let Some(segment) = writer.rotate(callback).unwrap() {
                 segments.push(segment);
             }
-            std::thread::sleep(Duration::from_millis(2));
+            boundary.wait();
         }
         producer.join().unwrap();
     });

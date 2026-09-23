@@ -796,6 +796,42 @@ fn one_notes_document_preserves_edits_and_ignores_late_generation() {
 }
 
 #[test]
+fn generated_replacements_keep_the_exact_previous_document_across_reload() {
+    let root = std::env::temp_dir().join(format!("meeting-notes-restore-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::new(root.clone());
+    let mut session = Session::new(CreateSessionInput {
+        title: "Synthetic notes recovery".into(),
+        context: String::new(),
+        attendees: vec![],
+    });
+    let manual = "  Keep this exact qualification.\nDo not promise a launch date.\n";
+    session.notes = Some(manual.into());
+    session.update_enriched_notes("Generated version".into(), manual);
+    store.save(&session).unwrap();
+    let mut saved = store.get(&session.id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap()["previousNotes"],
+        manual
+    );
+    saved.notes = Some(String::new());
+    saved.update_enriched_notes("Stale generation".into(), "Generated version");
+    assert_eq!(saved.notes(), "");
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap()["previousNotes"],
+        manual
+    );
+    saved.update_enriched_notes("Next generated version".into(), "");
+    store.save(&saved).unwrap();
+    let restored = store.get(&saved.id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap()["previousNotes"],
+        ""
+    );
+    assert_eq!(restored.notes(), "Next generated version");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn unified_note_saves_preserve_empty_edits_and_reject_oversize_before_mutation() {
     let mut session = Session::new(CreateSessionInput {
         title: "Test".into(),

@@ -11,8 +11,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     domain::{
-        transition_to_failed, transition_to_processing, AppError, AppResult, AudioFormat, AudioSource,
-        CreateSessionInput, MeetingAnswer, Session, SessionStatus, SourceTranscript,
+        transition_to_failed, transition_to_processing, AppError, AppResult, AudioFormat,
+        AudioSource, CreateSessionInput, MeetingAnswer, Session, SessionStatus, SourceTranscript,
         TranscriptChunk, TranscriptionSettings, UpdateSessionInput,
     },
     openai::{sections_to_markdown, OpenAiClient},
@@ -210,16 +210,23 @@ fn start_recording_state(
     state
         .store
         .validate_audio_path(id, &system_path.to_string_lossy(), session.audio_format)?;
-    state
-        .store
-        .validate_microphone_audio_path(id, &microphone_path.to_string_lossy(), session.audio_format)?;
+    state.store.validate_microphone_audio_path(
+        id,
+        &microphone_path.to_string_lossy(),
+        session.audio_format,
+    )?;
     if let Some(parent) = system_path.parent() {
         fs::create_dir_all(parent).map_err(storage_error)?;
     }
     let recording = match start(&session.id, &system_path, &microphone_path) {
         Ok(recording) => recording,
         Err(error) => {
-            if session.segmented_capture && !state.store.segment_files(id, session.audio_format)?.is_empty() {
+            if session.segmented_capture
+                && !state
+                    .store
+                    .segment_files(id, session.audio_format)?
+                    .is_empty()
+            {
                 update_processing(state, id, |session| {
                     session.status = SessionStatus::Failed;
                     session.error = Some(error.clone());
@@ -238,12 +245,16 @@ fn start_recording_state(
     ) {
         let _ = state.recorder.stop(&session.id);
         for path in [
-            state
-                .store
-                .validate_audio_path(id, &system_path.to_string_lossy(), session.audio_format),
-            state
-                .store
-                .validate_microphone_audio_path(id, &microphone_path.to_string_lossy(), session.audio_format),
+            state.store.validate_audio_path(
+                id,
+                &system_path.to_string_lossy(),
+                session.audio_format,
+            ),
+            state.store.validate_microphone_audio_path(
+                id,
+                &microphone_path.to_string_lossy(),
+                session.audio_format,
+            ),
         ]
         .into_iter()
         .flatten()
@@ -353,7 +364,12 @@ pub async fn ask_meetings(
         .ok_or_else(|| AppError::new("missing_api_key", "OpenAI API key is required"))?;
     state
         .openai
-        .ask_meetings_with_history(&sessions, question, &api_key, history.as_deref().unwrap_or_default())
+        .ask_meetings_with_history(
+            &sessions,
+            question,
+            &api_key,
+            history.as_deref().unwrap_or_default(),
+        )
         .await
 }
 
@@ -1151,9 +1167,20 @@ fn delete_transcript_state(state: &AppState, id: &str) -> AppResult<Session> {
     let _guard = lock_sessions(state)?;
     ensure_processing_idle(state, id)?;
     let mut session = state.store.get(id)?;
-    if session.segmented_capture && !state.store.segment_files(id, session.audio_format)?.is_empty() {
+    if session.segmented_capture
+        && !state
+            .store
+            .segment_files(id, session.audio_format)?
+            .is_empty()
+    {
         // The base path is the retained-source marker; numbered paths remain derived by the store.
-        session.audio_path = Some(state.store.audio_path(id, session.audio_format)?.to_string_lossy().into_owned());
+        session.audio_path = Some(
+            state
+                .store
+                .audio_path(id, session.audio_format)?
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     let session = transcript_deleted(session)?;
     state.store.save(&session)?;
@@ -1252,7 +1279,9 @@ pub fn recover_interrupted_sessions(store: &SessionStore) -> AppResult<()> {
             SessionStatus::Recording | SessionStatus::Processing
         ) || (session.status == SessionStatus::Draft
             && session.segmented_capture
-            && !store.segment_files(&session.id, session.audio_format)?.is_empty())
+            && !store
+                .segment_files(&session.id, session.audio_format)?
+                .is_empty())
         {
             let mut session = session;
             if session.segmented_capture {
@@ -1318,7 +1347,11 @@ fn retained_audio_path(state: &AppState, session: &Session) -> AppResult<Option<
     session
         .audio_path
         .as_deref()
-        .map(|saved| state.store.validate_audio_path(&session.id, saved, session.audio_format))
+        .map(|saved| {
+            state
+                .store
+                .validate_audio_path(&session.id, saved, session.audio_format)
+        })
         .transpose()
 }
 
@@ -1371,9 +1404,10 @@ mod tests {
         time::Duration,
     };
 
+    #[cfg(unix)]
+    use crate::recorder::RecordingFiles;
     use crate::{
         domain::{AppError, CreateSessionInput, Session, SessionStatus, UpdateSessionInput},
-        recorder::RecordingFiles,
         store::SessionStore,
     };
 

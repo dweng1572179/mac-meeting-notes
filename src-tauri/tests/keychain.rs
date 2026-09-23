@@ -18,7 +18,9 @@ fn disposable_credential_survives_fresh_entries() {
                 .and_then(|entry| entry.delete_credential());
             // SAFETY: restore the test process's normal Keychain interaction policy.
             #[cfg(target_os = "macos")]
-            unsafe { SecKeychainSetUserInteractionAllowed(true) };
+            unsafe {
+                SecKeychainSetUserInteractionAllowed(true)
+            };
         }
     }
 

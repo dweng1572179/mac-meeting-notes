@@ -16,31 +16,59 @@ fn followup_questions_keep_history_separate_from_current_evidence() {
     use meeting_notes_lib::domain::QuestionTurn;
     let mut source = session();
     source.notes = Some("The review is now Monday.".into());
-    let history = [QuestionTurn { question: "When is the review?".into(), answer: "It was Friday.".into() }];
+    let history = [QuestionTurn {
+        question: "When is the review?".into(),
+        answer: "It was Friday.".into(),
+    }];
     let (url, requests) = local_server(json_response(200, &json!({
         "status":"completed", "output":[{"content":[{"type":"output_text","text":json!({
             "answer":"The current notes say Monday.","supported":true,"source_ids":["m0:notes:0"]
         }).to_string()}]}]
     }).to_string()));
-    let answer = tauri::async_runtime::block_on(OpenAiClient::with_base_url(url).ask_meetings_with_history(
-        &[source], "Has that changed?", "test-key", &history
-    )).unwrap();
+    let answer =
+        tauri::async_runtime::block_on(OpenAiClient::with_base_url(url).ask_meetings_with_history(
+            &[source],
+            "Has that changed?",
+            "test-key",
+            &history,
+        ))
+        .unwrap();
     assert_eq!(answer.citations[0].excerpt, "The review is now Monday.");
     let request: Value = serde_json::from_str(&requests.recv().unwrap().body).unwrap();
-    let input: Value = serde_json::from_str(request["input"][0]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let input: Value =
+        serde_json::from_str(request["input"][0]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(input["conversation"][0]["answer"], "It was Friday.");
     assert!(!input["passages"].to_string().contains("It was Friday."));
-    let legal_ids = request["text"]["format"]["schema"]["properties"]["source_ids"]["items"]["enum"].as_array().unwrap();
+    let legal_ids = request["text"]["format"]["schema"]["properties"]["source_ids"]["items"]
+        ["enum"]
+        .as_array()
+        .unwrap();
     assert!(legal_ids.contains(&json!("m0:notes:0")));
-    assert!(legal_ids.iter().all(|id| input["passages"].as_array().unwrap().iter().any(|passage| &passage["id"] == id)));
+    assert!(legal_ids.iter().all(|id| input["passages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|passage| &passage["id"] == id)));
 }
 
 #[test]
 fn excessive_question_history_is_rejected_before_a_paid_request() {
     use meeting_notes_lib::domain::QuestionTurn;
-    let history: Vec<_> = (0..5).map(|_| QuestionTurn { question: "Question".into(), answer: "Answer".into() }).collect();
-    let error = tauri::async_runtime::block_on(OpenAiClient::with_base_url("http://127.0.0.1:9/v1")
-        .ask_meetings_with_history(&[session()], "And then?", "test-key", &history)).unwrap_err();
+    let history: Vec<_> = (0..5)
+        .map(|_| QuestionTurn {
+            question: "Question".into(),
+            answer: "Answer".into(),
+        })
+        .collect();
+    let error = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url("http://127.0.0.1:9/v1").ask_meetings_with_history(
+            &[session()],
+            "And then?",
+            "test-key",
+            &history,
+        ),
+    )
+    .unwrap_err();
     assert_eq!(error.code, "question_history_too_large");
 }
 
@@ -316,21 +344,33 @@ fn wav_upload_uses_pcm_mime_and_rejects_truncation_before_network() {
     audio.extend_from_slice(b"\x02\0\x10\0data\x02\0\0\0\x01\0");
     std::fs::write(&path, &audio).unwrap();
     let (url, requests) = local_server(json_response(200, r#"{"text":"PCM words"}"#));
-    let transcript = tauri::async_runtime::block_on(OpenAiClient::with_base_url(url).transcribe(&path, "test-key")).unwrap();
+    let transcript = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url(url).transcribe(&path, "test-key"),
+    )
+    .unwrap();
     assert_eq!(transcript, "PCM words");
     let request = requests.recv().unwrap();
-    assert!(request.body.to_lowercase().contains("content-type: audio/wav\r\n"));
+    assert!(request
+        .body
+        .to_lowercase()
+        .contains("content-type: audio/wav\r\n"));
     assert!(request.body.contains(".wav\""));
     audio.pop();
     std::fs::write(&path, &audio).unwrap();
-    let error = tauri::async_runtime::block_on(OpenAiClient::with_base_url("http://127.0.0.1:1/v1").transcribe(&path, "test-key")).unwrap_err();
+    let error = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url("http://127.0.0.1:1/v1").transcribe(&path, "test-key"),
+    )
+    .unwrap_err();
     assert_eq!(error.code, "audio_chunk");
     assert!(path.exists());
     audio.truncate(44);
     audio[4..8].copy_from_slice(&36u32.to_le_bytes());
     audio[40..44].copy_from_slice(&0u32.to_le_bytes());
     std::fs::write(&path, &audio).unwrap();
-    let empty = tauri::async_runtime::block_on(OpenAiClient::with_base_url("http://127.0.0.1:1/v1").transcribe(&path, "test-key")).unwrap();
+    let empty = tauri::async_runtime::block_on(
+        OpenAiClient::with_base_url("http://127.0.0.1:1/v1").transcribe(&path, "test-key"),
+    )
+    .unwrap();
     assert!(empty.is_empty());
     std::fs::remove_file(path).unwrap();
 }
@@ -902,6 +942,29 @@ fn live_synthetic_meeting_questions_with_openai() {
                     .contains(&citation.excerpt)
         );
     }
+    let followup = tauri::async_runtime::block_on(client.ask_meetings_with_history(
+        &[source.clone()],
+        "Who will request that report, and when? Answer entirely in Spanish.",
+        key.trim(),
+        &[meeting_notes_lib::domain::QuestionTurn {
+            question: "what was it about".into(),
+            answer: answer.answer.clone(),
+        }],
+    ))
+    .unwrap();
+    assert!(followup.answer.to_lowercase().contains("alex"));
+    assert!(followup.answer.to_lowercase().contains("viernes"));
+    assert!(!followup.citations.is_empty());
+    for citation in &followup.citations {
+        assert!(
+            source.notes().contains(&citation.excerpt)
+                || source
+                    .transcript
+                    .as_ref()
+                    .unwrap()
+                    .contains(&citation.excerpt)
+        );
+    }
     let unknown = tauri::async_runtime::block_on(client.ask_meetings(
         &[source],
         "What is Maya's mobile phone number?",
@@ -910,7 +973,7 @@ fn live_synthetic_meeting_questions_with_openai() {
     .unwrap();
     assert!(unknown.citations.is_empty());
     assert!(unknown.answer.contains("don’t contain enough information"));
-    println!("Synthetic text-only acceptance: broad summary with {} saved passages; unavailable fact handled normally; two requests in {:.1}s.", answer.citations.len(), started.elapsed().as_secs_f64());
+    println!("Synthetic text-only acceptance: broad summary with {} saved passages; contextual Spanish follow-up with {} saved passages; unavailable fact handled normally; three requests in {:.1}s.", answer.citations.len(), followup.citations.len(), started.elapsed().as_secs_f64());
 }
 
 #[test]

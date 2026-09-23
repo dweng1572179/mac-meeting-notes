@@ -36,6 +36,7 @@
     exportMarkdown,
     onWindowCloseRequested,
     refreshInsights,
+    restoreNotes,
     saveSession
   } from './api';
   import { createAutosave } from './autosave';
@@ -50,6 +51,7 @@
 
   let {
     session,
+    availableFolders = [],
     hasApiKey,
     health = null,
     recordingStartedAt,
@@ -61,6 +63,7 @@
     onDeleteMeeting
   }: {
     session: Session;
+    availableFolders?: string[];
     hasApiKey: boolean;
     health?: RecordingHealth | null;
     recordingStartedAt: number | null;
@@ -94,6 +97,7 @@
   let suggestionPending = $state('');
   let suggestionError = $state('');
   let refreshing = $state(false);
+  let restoring = $state(false);
   let actionMenu: HTMLDivElement;
   let confirmationDialog: HTMLDialogElement;
 
@@ -254,6 +258,24 @@
     }
   }
 
+  async function restorePreviousNotes() {
+    actionMenu.hidePopover();
+    restoring = true;
+    menuExportError = false;
+    menuExportStatus = '';
+    try {
+      await flush();
+      onSessionChange(await restoreNotes(session.id, notes));
+      view = 'notes';
+      menuExportStatus = 'Previous notes restored. Use Restore previous notes again to return to the version you just left.';
+    } catch (error) {
+      menuExportError = true;
+      menuExportStatus = errorMessage(error, 'Previous notes could not be restored. Your current document was kept.');
+    } finally {
+      restoring = false;
+    }
+  }
+
   function requestDeletion(target: 'transcript' | 'meeting') {
     actionMenu.hidePopover();
     confirmation = target;
@@ -278,7 +300,7 @@
   }
 
   const meetingDate = (startedAt: string) =>
-    new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(
+    new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(
       new Date(startedAt)
     );
 </script>
@@ -301,6 +323,9 @@
       </button>
       {#if session.status === 'complete' && session.transcript}
         <button type="button" disabled={refreshing} onclick={refreshMeetingInsights}>{refreshing ? 'Refreshing…' : 'Update notes from transcript'}</button>
+      {/if}
+      {#if session.previousNotes !== null && session.previousNotes !== undefined}
+        <button type="button" disabled={restoring || session.status === 'recording' || session.status === 'processing'} onclick={restorePreviousNotes}>Restore previous notes</button>
       {/if}
       <button
         class="danger-action"
@@ -354,7 +379,8 @@
       </label>
       <label>
         <span>Category</span>
-        <span class="field-control"><input value={folder} oninput={updateFolder} placeholder="Acquisitions, leasing, or another project" disabled={Boolean(suggestionPending)} />
+        <span class="field-control"><input value={folder} oninput={updateFolder} list="meeting-categories" placeholder="Choose or type a category" disabled={Boolean(suggestionPending)} />
+          <datalist id="meeting-categories">{#each availableFolders as category}<option value={category}></option>{/each}</datalist>
           {#if session.aiSuggestions?.category && !(session.dismissedSuggestions ?? []).includes('category')}
             <span class="field-suggestion"><span>Suggested: <strong>{session.aiSuggestions.category.value}</strong></span><span><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('category', 'apply')}>Use</button><button type="button" disabled={Boolean(suggestionPending)} onclick={() => changeSuggestion('category', 'dismiss')}>Dismiss</button></span></span>
           {/if}
@@ -410,6 +436,7 @@
         id="meeting-notes"
         value={notes}
         oninput={updateNotes}
+        readonly={restoring}
         placeholder="Start with the questions, numbers, and decisions you want to remember."
         spellcheck="true"
         dir="auto"
@@ -441,7 +468,7 @@
   </section>
 
   {#if session.status === 'complete' && session.transcript !== null}
-    <MeetingQuestion {hasApiKey} onAsk={askCurrentMeeting} {onOpenSettings} topic={session.aiSuggestions?.topics.find((topic) => topic.evidence.length)?.title} />
+    <MeetingQuestion sessionId={session.id} {hasApiKey} onAsk={askCurrentMeeting} {onOpenSettings} topic={session.aiSuggestions?.topics.find((topic) => topic.evidence.length)?.title} />
   {/if}
 
 
@@ -467,6 +494,7 @@
         This meeting and its notes will be permanently removed. There is no retained audio recording to remove.
       {/if}
     </p>
+    <p class="settings-copy">AI answers that used this meeting will also be cleared. Unsent question drafts and unrelated conversations will stay.</p>
     {#if deleteError}<p class="deletion-error" role="alert">{deleteError}</p>{/if}
     <div class="deletion-footer">
       <button type="button" disabled={deleting} onclick={() => confirmationDialog.close()}>Cancel</button>

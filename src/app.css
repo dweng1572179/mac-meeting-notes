@@ -202,7 +202,7 @@ main {
 
 .library-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.75fr);
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.9fr);
   width: min(100%, 1120px);
   min-height: calc(100vh - 136px);
   margin: 0 auto;

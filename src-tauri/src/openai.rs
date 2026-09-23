@@ -128,10 +128,21 @@ impl OpenAiClient {
         }
         let audio = std::fs::read(audio_path)
             .map_err(|_| AppError::new("audio_file", "Unable to read recorded audio"))?;
-        let (has_media, mime) = match audio_path.extension().and_then(|extension| extension.to_str()) {
+        let (has_media, mime) = match audio_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
             Some("m4a") => (has_m4a_media(&audio)?, "audio/mp4"),
-            Some("wav") => (crate::audio::wav::inspect_bytes(&audio)?.frames > 0, "audio/wav"),
-            _ => return Err(AppError::new("audio_file", "Unsupported recorded audio format. Your audio was kept.")),
+            Some("wav") => (
+                crate::audio::wav::inspect_bytes(&audio)?.frames > 0,
+                "audio/wav",
+            ),
+            _ => {
+                return Err(AppError::new(
+                    "audio_file",
+                    "Unsupported recorded audio format. Your audio was kept.",
+                ))
+            }
         };
         if !has_media {
             return Ok(TranscriptionResult::default());
@@ -281,7 +292,8 @@ impl OpenAiClient {
         question: &str,
         api_key: &str,
     ) -> AppResult<MeetingAnswer> {
-        self.ask_meetings_with_history(sessions, question, api_key, &[]).await
+        self.ask_meetings_with_history(sessions, question, api_key, &[])
+            .await
     }
 
     pub async fn ask_meetings_with_history(
@@ -296,7 +308,9 @@ impl OpenAiClient {
             .post(format!("{}/responses", self.base_url))
             .timeout(Duration::from_secs(300))
             .bearer_auth(api_key)
-            .json(&build_meeting_question_request(sessions, question, history)?)
+            .json(&build_meeting_question_request(
+                sessions, question, history,
+            )?)
             .send()
             .await
             .map_err(openai_request_error)?;
@@ -510,14 +524,29 @@ fn question_passages(sessions: &[Session]) -> AppResult<Vec<QuestionPassage>> {
     Ok(passages)
 }
 
-fn build_meeting_question_request(sessions: &[Session], question: &str, history: &[crate::domain::QuestionTurn]) -> AppResult<Value> {
-    if history.len() > 4 || history.iter().any(|turn| turn.question.chars().count() > 2000 || turn.answer.chars().count() > 12000)
-        || history.iter().map(|turn| turn.question.len() + turn.answer.len()).sum::<usize>() > 60_000 {
+fn build_meeting_question_request(
+    sessions: &[Session],
+    question: &str,
+    history: &[crate::domain::QuestionTurn],
+) -> AppResult<Value> {
+    if history.len() > 4
+        || history
+            .iter()
+            .any(|turn| turn.question.chars().count() > 2000 || turn.answer.chars().count() > 12000)
+        || history
+            .iter()
+            .map(|turn| turn.question.len() + turn.answer.len())
+            .sum::<usize>()
+            > 60_000
+    {
         return Err(AppError::new("question_history_too_large", "This conversation is too long to send. Start a new conversation; your meeting is unchanged."));
     }
     let passages = question_passages(sessions)?;
     let source_ids: Vec<_> = passages.iter().map(|source| source.id.as_str()).collect();
-    if source_ids.is_empty() || source_ids.len() > 1000 || source_ids.iter().map(|id| id.len()).sum::<usize>() > 15_000 {
+    if source_ids.is_empty()
+        || source_ids.len() > 1000
+        || source_ids.iter().map(|id| id.len()).sum::<usize>() > 15_000
+    {
         return Err(question_context_error(sessions.len()));
     }
     let sources: Vec<_> = passages.iter().map(|source| json!({
@@ -528,7 +557,8 @@ fn build_meeting_question_request(sessions: &[Session], question: &str, history:
     if source_input.to_string().len() > 200_000 {
         return Err(question_context_error(sessions.len()));
     }
-    let input = json!({"question": question.trim(), "passages": sources, "conversation": history}).to_string();
+    let input = json!({"question": question.trim(), "passages": sources, "conversation": history})
+        .to_string();
     Ok(json!({
         "model": ENRICHMENT_MODEL,
         "store": false,
