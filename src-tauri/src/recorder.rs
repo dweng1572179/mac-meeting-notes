@@ -245,13 +245,32 @@ struct ExecutableFingerprint {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(windows)]
+    file_id: (u32, u32, u32),
 }
 
 impl ExecutableFingerprint {
     fn read(path: &Path) -> Option<Self> {
-        let metadata = std::fs::metadata(path).ok()?;
+        let file = std::fs::File::open(path).ok()?;
+        let metadata = file.metadata().ok()?;
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
+        #[cfg(windows)]
+        let file_id = {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::{
+                Foundation::HANDLE,
+                Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+            };
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            // SAFETY: the file owns this handle, and the output lives for the whole call.
+            unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+            (
+                info.dwVolumeSerialNumber,
+                info.nFileIndexHigh,
+                info.nFileIndexLow,
+            )
+        };
         Some(Self {
             length: metadata.len(),
             modified: metadata.modified().ok(),
@@ -259,6 +278,8 @@ impl ExecutableFingerprint {
             device: metadata.dev(),
             #[cfg(unix)]
             inode: metadata.ino(),
+            #[cfg(windows)]
+            file_id,
         })
     }
 }
@@ -2224,6 +2245,20 @@ mod tests {
         assert!(!identity.changed());
         let replacement = directory.join("new-app");
         std::fs::write(&replacement, b"new").unwrap();
+        // Replacement can preserve both size and timestamp; identity must distinguish the files.
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::fs::metadata(&path).unwrap().modified().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            std::fs::metadata(&replacement).unwrap().modified().unwrap()
+        );
         std::fs::rename(replacement, &path).unwrap();
         assert!(identity.changed());
         std::fs::remove_file(&path).unwrap();
