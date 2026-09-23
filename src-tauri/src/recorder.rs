@@ -524,7 +524,7 @@ pub(crate) mod native {
         kAudioFormatLinearPCM, kAudioFormatMPEG4AAC, AudioBufferList, AudioStreamBasicDescription,
         AudioTimeStamp, AudioValueRange,
     };
-    use objc2_core_foundation::{CFDictionary, CFURL};
+    use objc2_core_foundation::{CFDictionary, CFString, CFURL};
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSObject, NSString};
 
     use crate::{
@@ -550,6 +550,17 @@ pub(crate) mod native {
     unsafe extern "C" {
         fn mach_timebase_info(info: *mut MachTimebase) -> i32;
         fn mach_continuous_time() -> u64;
+    }
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        fn IOPMAssertionCreateWithName(
+            assertion_type: *const CFString,
+            level: u32,
+            name: *const CFString,
+            assertion_id: *mut u32,
+        ) -> i32;
+        fn IOPMAssertionRelease(assertion_id: u32) -> i32;
     }
 
     #[derive(Clone, Copy)]
@@ -811,6 +822,7 @@ pub(crate) mod native {
         microphone_segments: Option<SegmentWriter>,
         rotation_warnings: Vec<String>,
         finalized_segments: Vec<CapturedSegment>,
+        sleep_assertion: Option<u32>,
     }
 
     // SAFETY: ownership moves only under Recorder's mutex. Core Audio accesses CallbackState
@@ -888,6 +900,7 @@ pub(crate) mod native {
             segmented: bool,
         ) -> AppResult<Self> {
             let mut recording = Self::unstarted(path, microphone_path, segmented)?;
+            recording.prevent_idle_sleep();
             // SAFETY: setup records owned resources before any later operation can fail.
             unsafe {
                 if let Err(error) = recording.setup(path, microphone_path) {
@@ -918,7 +931,26 @@ pub(crate) mod native {
                 microphone_segments: None,
                 rotation_warnings: Vec::new(),
                 finalized_segments: Vec::new(),
+                sleep_assertion: None,
             })
+        }
+
+        fn prevent_idle_sleep(&mut self) {
+            let assertion_type = CFString::from_str("PreventUserIdleSystemSleep");
+            let name = CFString::from_str("Meeting Notes recording");
+            let mut assertion = 0;
+            // SAFETY: both CF strings and the output ID are alive for this call.
+            // Level 255 is kIOPMAssertionLevelOn. Display sleep remains allowed.
+            let status = unsafe {
+                IOPMAssertionCreateWithName(&*assertion_type, 255, &*name, &mut assertion)
+            };
+            if status == NO_ERR {
+                self.sleep_assertion = Some(assertion);
+            } else {
+                self.rotation_warnings.push(format!(
+                    "macOS could not prevent idle sleep (status {status}). Keep your Mac awake while recording."
+                ));
+            }
         }
 
         pub(super) fn stop(mut self) -> AppResult<RecordingFiles> {
@@ -1176,6 +1208,13 @@ pub(crate) mod native {
                 );
                 self.tap_id = 0;
             }
+            if let Some(assertion) = self.sleep_assertion.take() {
+                collect_status(
+                    &mut errors,
+                    "IOPMAssertionRelease",
+                    IOPMAssertionRelease(assertion),
+                );
+            }
             self.finalized_segments
                 .sort_by_key(|segment| match segment.source {
                     AudioSource::System => 0,
@@ -1192,6 +1231,58 @@ pub(crate) mod native {
                     health
                 });
             (errors, health)
+        }
+    }
+
+    #[cfg(test)]
+    mod power_tests {
+        use super::*;
+
+        #[link(name = "IOKit", kind = "framework")]
+        unsafe extern "C" {
+            fn IOPMAssertionCopyProperties(assertion: u32) -> *const CFDictionary;
+        }
+
+        fn assertion_exists(assertion: u32) -> bool {
+            // SAFETY: CopyProperties accepts an assertion ID, including a released ID.
+            let properties = unsafe { IOPMAssertionCopyProperties(assertion) };
+            if let Some(properties) = NonNull::new(properties.cast_mut()) {
+                // SAFETY: CopyProperties returns an owned (+1) Core Foundation object.
+                drop(unsafe { objc2_core_foundation::CFRetained::from_raw(properties) });
+                true
+            } else {
+                false
+            }
+        }
+
+        #[test]
+        fn recording_power_assertion_releases_on_stop_failure_and_drop() {
+            for exit in ["stop", "failure", "drop"] {
+                let mut recording = NativeRecording::unstarted(
+                    Path::new("unused-system.m4a"),
+                    Path::new("unused-mic.m4a"),
+                    true,
+                )
+                .unwrap();
+                recording.prevent_idle_sleep();
+                let assertion = recording
+                    .sleep_assertion
+                    .expect("recording must prevent idle sleep");
+                assert!(assertion_exists(assertion));
+                match exit {
+                    "stop" => {
+                        recording.stop().unwrap();
+                    }
+                    "failure" => {
+                        recording.fail(AppError::new("test", "setup failed"));
+                    }
+                    _ => drop(recording),
+                }
+                assert!(
+                    !assertion_exists(assertion),
+                    "assertion leaked after {exit}"
+                );
+            }
         }
     }
 
@@ -1903,6 +1994,7 @@ pub(crate) mod native {
                 microphone_segments: None,
                 rotation_warnings: Vec::new(),
                 finalized_segments: Vec::new(),
+                sleep_assertion: None,
             };
             let files = recording.stop().unwrap();
             assert_eq!(files.microphone, PathBuf::from("microphone.m4a"));
