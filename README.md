@@ -47,7 +47,7 @@ See OpenAI's [data controls](https://developers.openai.com/api/docs/guides/your-
 Choose the installer for your computer from the latest GitHub release:
 
 - **Mac:** [`Meeting-Notes.dmg`](https://github.com/dweng1572179/mac-meeting-notes/releases/latest/download/Meeting-Notes.dmg)
-- **Windows x64 beta:** [`Meeting-Notes-Setup.exe`](https://github.com/dweng1572179/mac-meeting-notes/releases/latest/download/Meeting-Notes-Setup.exe). See the [v0.5.0 release notes](docs/releases/v0.5.0.md) for validation and known limits.
+- **Windows x64 beta:** [`Meeting-Notes-Setup.exe`](https://github.com/dweng1572179/mac-meeting-notes/releases/latest/download/Meeting-Notes-Setup.exe). See the [v0.6.0 release notes](docs/releases/v0.6.0.md) for validation and known limits.
 
 Do not install development or interim builds. Release checksums are included as `SHA256SUMS.txt`.
 
@@ -71,7 +71,7 @@ Future launches work normally from Applications. Updates to this ad-hoc signed b
 
 The Windows recorder captures the default microphone and default output endpoint. Devices remain selected for that recording; stop and start again after changing them. Audio sent to a different output endpoint will not be captured. Headphones help avoid recording computer playback twice through speakers and microphone.
 
-Windows uses native WASAPI and mono 16 kHz PCM WAV sections, without an FFmpeg dependency. Each track uses about 1.9 MB/minute while retained: a fully offline 110-minute two-track session can retain about 422 MB. Successfully checkpointed speech sections can be removed as usual. API transcription cost depends on duration, not WAV file size. Native Windows CI passed compilation, synthetic recording/recovery, credential persistence, installer creation, and install/reinstall/launch/uninstall with synthetic-data preservation. See the [validation receipt](docs/validation/v0.5.0-receipt.md) and [v0.5.0 release notes](docs/releases/v0.5.0.md). Physical Windows microphone/loopback, Bluetooth, device switching, sleep/wake, and real Edge audio remain unverified, as does WebView2 installation on a clean PC without an existing runtime.
+Windows uses native WASAPI and mono 16 kHz PCM WAV sections, without an FFmpeg dependency. Each track uses about 1.9 MB/minute while retained: a fully offline 110-minute two-track session can retain about 422 MB. Successfully checkpointed speech sections can be removed as usual. API transcription cost depends on duration, not WAV file size. Native Windows CI passed compilation, synthetic recording/recovery, credential persistence, installer creation, and install/reinstall/launch/uninstall with synthetic-data preservation. See the [validation receipt](docs/validation/v0.6.0-receipt.md) and [v0.6.0 release notes](docs/releases/v0.6.0.md). Physical Windows microphone/loopback, Bluetooth, device switching, sleep/wake, and real Edge audio remain unverified, as does WebView2 installation on a clean PC without an existing runtime.
 
 ## Language, accents, and terminology
 

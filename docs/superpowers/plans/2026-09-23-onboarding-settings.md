@@ -29,4 +29,5 @@ No new dependencies; existing worktree only. Synthetic verification only, preser
 - [x] Core UI: compact metadata and provide accessible meeting/library chat without burying its composer. Preserve autosave/recovery/citation behavior and existing visual system.
 - [x] Guidance: save current primary-source OAuth/billing/privacy advice, required registration artifacts and release gates in `docs/onboarding-and-integrations.md`.
 - [x] Verify: focused unit tests, Svelte check and production build; bounded browser test at standard/minimum sizes with synthetic data; disposable native startup/IPC/CSP checks; independent review and one batch of fixes.
-- [ ] Record exact validation and remaining integration/parity scope. Commit reviewable changes; release/install only after applicable checks and idle safety verification.
+- [x] Record exact validation and remaining integration/parity scope. Commit and merge reviewable changes; publish v0.6.0 only after both tagged platform jobs pass; independently verify public installer checksums and native Mac bundle.
+- [ ] Install the verified Mac release only when idle. Deferred on resume: one recording session plus four complete sessions, with a native Stop control. Leave installed v0.5.0 and ongoing capture untouched. Back up current app/native data/WebKit storage before a later update.
