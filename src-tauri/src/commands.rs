@@ -511,6 +511,7 @@ fn run_processing_worker(
     let mut paused: Option<AppError> = None;
     let mut retry_after: Option<Duration> = None;
     let mut retries = 0;
+    let mut was_recording = false;
     loop {
         let session = load_session(state, id)?;
         if !matches!(
@@ -519,6 +520,12 @@ fn run_processing_worker(
         ) {
             return Ok(session);
         }
+        // Stop should not inherit a long live backoff. Make a fresh, bounded final attempt.
+        if was_recording && session.status == SessionStatus::Processing && retry_after.is_some() {
+            retries = 0;
+            retry_after = Some(Duration::ZERO);
+        }
+        was_recording = session.status == SessionStatus::Recording;
         if let Some(error) = paused.as_ref() {
             match retry_after {
                 Some(remaining) if !remaining.is_zero() => {
@@ -566,12 +573,17 @@ fn run_processing_worker(
                 ) {
                     [2, 4, 8]
                         .get(retries)
-                        .map(|seconds| Duration::from_secs(*seconds))
+                        .copied()
+                        .or_else(|| {
+                            (session.status == SessionStatus::Recording)
+                                .then_some(if retries == 3 { 30 } else { 60 })
+                        })
+                        .map(Duration::from_secs)
                 } else {
                     None
                 };
                 if retry_after.is_some() {
-                    retries += 1;
+                    retries = (retries + 1).min(4);
                 }
                 // Do not transition to Failed if Stop wins the race with a retryable error.
                 progress(update_processing(state, id, |session| {
@@ -1650,14 +1662,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attempts.get(), 2);
-        assert_eq!(waited.get(), Duration::from_secs(2));
+        assert_eq!(waited.get(), Duration::from_millis(500));
         assert_eq!(complete.status, SessionStatus::Complete);
         assert!(complete.live_transcription_error.is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn worker_caps_transient_retries_and_never_retries_permanent_errors() {
+    fn worker_caps_final_retries_and_never_retries_permanent_errors() {
         use std::cell::Cell;
         for (code, expected_attempts, expected_delay) in [
             ("openai_timeout", 4, 14),
@@ -1668,6 +1680,19 @@ mod tests {
         ] {
             for initial_status in [SessionStatus::Recording, SessionStatus::Processing] {
                 let (state, root, id) = state(initial_status.clone());
+                let stop_after = expected_attempts;
+                let final_retry =
+                    initial_status == SessionStatus::Recording && code == "openai_timeout";
+                let expected_attempts = if final_retry {
+                    expected_attempts * 2
+                } else {
+                    expected_attempts
+                };
+                let expected_delay = if final_retry {
+                    expected_delay * 2
+                } else {
+                    expected_delay
+                };
                 let attempts = Cell::new(0);
                 let waited = Cell::new(Duration::ZERO);
                 let error = super::run_processing_worker(
@@ -1681,7 +1706,9 @@ mod tests {
                     &|_| {},
                     |delay| {
                         waited.set(waited.get() + delay);
-                        if attempts.get() == expected_attempts {
+                        if attempts.get() == stop_after
+                            && state.store.get(&id).unwrap().status == SessionStatus::Recording
+                        {
                             let saved = state.store.get(&id).unwrap();
                             assert_eq!(saved.status, SessionStatus::Recording);
                             assert_eq!(saved.live_transcription_error.unwrap().code, code);

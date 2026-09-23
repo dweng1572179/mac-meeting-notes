@@ -5,6 +5,133 @@ use crate::commands::live::{
 use crate::recorder::CapturedSegment;
 
 #[test]
+fn sustained_live_outage_resumes_pending_audio_without_reuploading_saved_sections() {
+    use std::cell::{Cell, RefCell};
+    let fixture = Fixture::new();
+    let input = fixture.source(false, 1, false);
+    let mut responses = vec![text_response("[SIMULATION] First checkpoint.")];
+    responses
+        .extend((0..6).map(|_| response(503, json!({"error":{"message":"temporary outage"}}))));
+    responses.extend([
+        text_response("[SIMULATION] Recovered while recording."),
+        enrichment(),
+    ]);
+    let (url, server) = server(responses, |_| {});
+    let state = fixture.state(&url);
+    let paths: Vec<_> = (0..2)
+        .map(|index| {
+            state
+                .store
+                .segment_path(&fixture.id, AudioSource::System, index, AudioFormat::Wav)
+                .unwrap()
+        })
+        .collect();
+    fs::copy(&input, &paths[0]).unwrap();
+    fs::rename(&input, &paths[1]).unwrap();
+    let mut session = state.store.get(&fixture.id).unwrap();
+    session.status = SessionStatus::Recording;
+    session.segmented_capture = true;
+    session.audio_path = None;
+    state.store.save(&session).unwrap();
+    let sections: Vec<_> = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| CapturedSegment {
+            source: AudioSource::System,
+            index: index as u64,
+            start_seconds: index as f64,
+            duration_seconds: 1.0,
+            path: path.clone(),
+        })
+        .collect();
+    register_segments(&state, &fixture.id, &sections).unwrap();
+    let lease = ProcessingLease::claim(&state, &fixture.id)
+        .unwrap()
+        .unwrap();
+    let elapsed = Cell::new(Duration::ZERO);
+    let attempts = RefCell::new(Vec::new());
+    let recovered_live = Cell::new(false);
+    let complete = run_processing_worker(
+        &state,
+        &fixture.id,
+        || {
+            assert!(ProcessingLease::claim(&state, &fixture.id)
+                .unwrap()
+                .is_none());
+            attempts.borrow_mut().push(elapsed.get());
+            tauri::async_runtime::block_on(process_session_with_key(
+                &state,
+                &fixture.id,
+                "test-only",
+                |_| {},
+            ))
+        },
+        &|_| {},
+        |delay| {
+            assert!(
+                delay <= Duration::from_millis(500),
+                "Stop must remain observable during backoff"
+            );
+            elapsed.set(elapsed.get() + delay);
+            let saved = state.store.get(&fixture.id).unwrap();
+            assert_eq!(saved.status, SessionStatus::Recording);
+            assert_eq!(saved.original_notes, session.original_notes);
+            assert_eq!(
+                saved.transcription[0].chunks[0].transcript.as_deref(),
+                Some("[SIMULATION] First checkpoint.")
+            );
+            assert!(!paths[0].exists());
+            if saved.transcription[0].chunks[1].transcript.is_some() {
+                assert!(saved.live_transcription_error.is_none());
+                assert!(!paths[1].exists());
+                recovered_live.set(true);
+                update_processing(&state, &fixture.id, |session| {
+                    session.status = SessionStatus::Processing
+                })
+                .unwrap();
+            } else {
+                assert!(paths[1].exists(), "pending audio must remain retryable");
+                assert!(
+                    elapsed.get() <= Duration::from_secs(165),
+                    "live processing stopped retrying"
+                );
+            }
+        },
+    )
+    .unwrap();
+    drop(lease);
+    let requests = server.join().unwrap();
+    assert!(recovered_live.get());
+    assert_eq!(complete.status, SessionStatus::Complete);
+    assert_eq!(complete.original_notes, session.original_notes);
+    assert_eq!(complete.transcription[0].chunks.len(), 2);
+    assert_eq!(
+        complete.transcription[0].chunks[1].transcript.as_deref(),
+        Some("[SIMULATION] Recovered while recording.")
+    );
+    assert_eq!(state.store.get(&fixture.id).unwrap(), complete);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/audio/transcriptions"))
+            .count(),
+        8,
+        "only the pending section may be uploaded again after each failure"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/responses"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        *attempts.borrow(),
+        [0, 2000, 6000, 14000, 44000, 104000, 164000, 164500].map(Duration::from_millis)
+    );
+}
+
+#[test]
 fn older_section_registered_during_upload_does_not_move_newer_checkpoint() {
     let fixture = Fixture::new();
     let input = fixture.source(false, 1, false);
