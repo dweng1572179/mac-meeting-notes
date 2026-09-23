@@ -4,19 +4,20 @@ A lightweight Mac and Windows meeting notepad that records your microphone and c
 
 ## What it does
 
-- Captures the default microphone and Mac computer audio together without inviting a meeting bot.
-- Finalizes native AAC sections around every 60 seconds and transcribes them sequentially while recording continues. Stop saves the final tails and finishes pending work; this is section-based transcription, not word-by-word live captions.
-- Saves each completed transcription before deleting its audio. Ordinary retries reuse saved progress; dense sections that reach the model output limit are split further. A network failure pauses transcription without stopping capture.
+- Captures the default microphone and computer audio together without inviting a meeting bot.
+- Finalizes native AAC sections on Mac or PCM WAV sections on Windows around every 60 seconds and transcribes them sequentially while recording continues. Stop saves the final tails and finishes pending work; this is section-based transcription, not word-by-word live captions.
+- Saves each completed transcription before deleting its audio. Ordinary retries reuse saved progress; dense sections that reach the model output limit are split further. Transient failures retry automatically while capture continues, with a capped delay after the first fast retries. Stop starts a fresh, finite final-processing attempt; permanent errors still need attention.
 - Prevents automatic idle system sleep while recording. The display may turn off; keep the lid open and power connected. Manual sleep, lid closure and a depleted battery can still interrupt capture.
 - Shows missing/stalled-source warnings and separate elapsed/captured durations. Partial transcripts and capture warnings survive interruptions.
 - Opens every meeting as one editable **Notes** document, with **Transcript** as its reference. Notes autosave before navigation, export, and questions. Older meetings retain manual text missing from their summary; deleting a transcript keeps the notes.
 - Displays timed speaker turns when speaker detection is selected, with searchable text, source labels, topic navigation, and access to the raw transcript. Plain transcripts use paragraphs and quiet timestamps instead of repeating section headings. Invalid speaker annotations fall back to the returned transcript text with a notice, without another paid request. Speaker labels are local to each source/upload; matching labels in different sections do not identify the same person.
 - Produces notes plus suggested title, context, category, participants, and topic anchors in one structured enrichment response. Suggestions carry exact supporting excerpts and require your acceptance; they never silently replace manual fields. Suggestions without verified evidence are omitted while usable notes are kept.
-- **Update notes from transcript** refreshes a completed meeting using its current notes and saved transcript. Edits made while that request runs take priority over its result. This does not recreate missing audio or add speaker attribution to older plain transcripts.
+- **Update notes from transcript** refreshes a completed meeting using its current notes and saved transcript. It keeps one immediately previous document; **Restore previous notes** swaps the two versions and can be reversed. Edits made while generation runs take priority over its result. This does not recreate missing audio or add speaker attribution to older plain transcripts.
 - Exports Markdown to Downloads with notes, transcript, meeting details, and capture warnings. Incomplete processing is labeled.
 - Saves language and recognition preferences. New installations with no saved preferences default to speaker detection; existing saved choices remain unchanged. Text-only options retain vocabulary hints.
-- Organizes meetings with local categories/folders, a timeline-style library, and search across meeting details, notes, and transcripts.
-- Answers meeting and library questions with saved-passage citations. The model selects passage IDs and the app supplies the exact source text; unavailable answers are normal responses. Oversized source selections produce a clear error instead of silently dropping later decisions. Both question views share a compact conversation with Command/Ctrl+Enter, formatted answers and expandable sources. Follow-ups include up to four prior question/answer pairs to resolve references; current saved passages remain the only factual evidence. Failed requests preserve earlier answers and your question. Starting a new conversation clears the question thread without changing the meeting.
+- Organizes meetings with local categories/folders, suggestions from existing category names, a timeline-style library, and search across meeting details, notes, and transcripts.
+- Answers meeting and library questions with saved-passage citations, readable formatted answers, copy, and expandable sources. Follow-ups include up to four prior turns to resolve references; current saved passages remain the evidence. Oversized source selections produce an explicit error.
+- Keeps a separate conversation for each meeting, folder, and the whole library. Full answers, citations, and drafts survive navigation and restart; a request can finish after you leave its view. An interrupted request requires an explicit retry instead of automatically repeating a paid call. Only follow-up request context is shortened. Starting a new conversation preserves your draft, and storage failures are visible.
 
 ## Privacy
 
@@ -38,7 +39,7 @@ See OpenAI's [data controls](https://developers.openai.com/api/docs/guides/your-
 Choose the installer for your computer from the latest GitHub release:
 
 - **Mac:** [`Meeting-Notes.dmg`](https://github.com/dweng1572179/mac-meeting-notes/releases/latest/download/Meeting-Notes.dmg)
-- **Windows x64:** [`Meeting-Notes-Setup.exe`](https://github.com/dweng1572179/mac-meeting-notes/releases/latest/download/Meeting-Notes-Setup.exe)
+- **Windows x64 beta:** `Meeting-Notes-Setup.exe` is planned for v0.5.0 after final validation. Check the [v0.5.0 release notes](docs/releases/v0.5.0.md) for the pending release status.
 
 Do not install development or interim builds. Release checksums are included as `SHA256SUMS.txt`.
 
@@ -53,7 +54,7 @@ Future launches work normally from Applications. Updates to this ad-hoc signed b
 
 ## First launch on Windows
 
-1. Download **Meeting-Notes-Setup.exe** from the release linked above. Stop recording and quit Meeting Notes before any update.
+1. Once v0.5.0 is published, download **Meeting-Notes-Setup.exe** from that release. Stop recording and quit Meeting Notes before any update.
 2. Run the installer. It installs for your Windows account and installs/updates Microsoft WebView2 if necessary. Internet access is needed for a missing runtime.
 3. This beta does not have an Authenticode signing certificate. If SmartScreen blocks it, verify it came from this repository and check its published SHA-256 before choosing **More info → Run anyway**, if that option is available. Managed laptops may require an administrator's approval.
 4. Open Meeting Notes and add your paid OpenAI API key in Settings. The key is saved in Windows Credential Manager.
@@ -62,7 +63,7 @@ Future launches work normally from Applications. Updates to this ad-hoc signed b
 
 The Windows recorder captures the default microphone and default output endpoint. Devices remain selected for that recording; stop and start again after changing them. Audio sent to a different output endpoint will not be captured. Headphones help avoid recording computer playback twice through speakers and microphone.
 
-Windows uses native WASAPI and mono 16 kHz PCM WAV sections, without an FFmpeg dependency. Each track uses about 1.9 MB/minute while retained: a fully offline 110-minute two-track session can retain about 422 MB. Successfully checkpointed speech sections can be removed as usual. API transcription cost depends on duration, not WAV file size. Native Windows CI covers compilation, synthetic recording/recovery tests, credential persistence, installer creation and launch; physical Windows microphones, Bluetooth, and real Edge audio still need device testing.
+Windows uses native WASAPI and mono 16 kHz PCM WAV sections, without an FFmpeg dependency. Each track uses about 1.9 MB/minute while retained: a fully offline 110-minute two-track session can retain about 422 MB. Successfully checkpointed speech sections can be removed as usual. API transcription cost depends on duration, not WAV file size. Native Windows CI is configured to check compilation, synthetic recording/recovery, credential persistence, and installer creation, install/reinstall/launch/uninstall with synthetic-data preservation. Final CI and installer receipts are still pending in the [v0.5.0 release notes](docs/releases/v0.5.0.md). Physical Windows microphone/loopback, Bluetooth, device switching, sleep/wake, and real Edge audio remain unverified, as does WebView2 installation on a clean PC without an existing runtime.
 
 ## Language, accents, and terminology
 
@@ -113,9 +114,11 @@ The repeatable labeled simulation and expected results are in [`docs/evaluation.
 
 ## Storage
 
-Meeting metadata, your notes, raw transcripts, generated AI notes, your AI-note edits, suggestions, and transcription progress are stored locally in the app's platform-specific application-data directory. The interface presents one editable Notes document; the previous generated baseline is retained internally to preserve edits safely.
+Meeting metadata, your notes, raw transcripts, generated AI notes, your AI-note edits, suggestions, and transcription progress are stored locally in the app's platform-specific application-data directory. The interface presents one editable Notes document. One previous document is retained for reversible restoration after enhancement; this is not unlimited version history.
 
 New recordings use numbered source sections. A finalized section becomes eligible for transcription only after capture closes and syncs its file. Transcription is atomically saved before successfully checkpointed speech audio can be deleted; silent, failed, or unreadable audio may remain for recovery. Startup/retry can recover unregistered section files and retains unreadable tails with warnings. Legacy whole-file recordings keep their retry path.
+
+Question conversations are saved separately in the app’s local webview storage. Deleting a meeting or transcript first clears related saved AI answers; unrelated conversations and aggregate drafts stay. Cleanup failure blocks deletion, and the confirmation explains the affected history.
 
 A failure between an API response and its durable checkpoint can require that request again. Deleting a meeting also deletes its contained retained audio. The API key is stored separately in macOS Keychain or Windows Credential Manager.
 
